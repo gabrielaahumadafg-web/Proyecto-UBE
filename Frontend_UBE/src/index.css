@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Tamaño de fuente legible para controles de formulario.
+
+  Estas reglas van SIN @layer a propósito: el CSS sin capa gana sobre las
+  utilidades de Tailwind (text-sm, etc.), que viven en @layer utilities. Así
+  garantizamos un tamaño uniforme y legible en TODA la app sin tener que tocar
+  cada className.
+
+  Lo importante: Chrome/Windows NO hereda de forma fiable el font-size del
+  <select> hacia la lista de <option> del desplegable nativo. Sin una regla
+  explícita en `option`, las opciones del menú se ven diminutas (ese era el bug
+  de "los selectores se ven muy chicos al abrirlos").
+*/
+select,
+input,
+textarea,
+option {
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+/* El único <select> intencionalmente compacto (grilla de campus por día del
+   coordinador) se protege con un tamaño propio para no romper su grilla. */
+select.select-compacto {
+  font-size: 0.72rem;
+}

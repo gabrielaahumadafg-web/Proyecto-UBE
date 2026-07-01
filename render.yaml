@@ -1,0 +1,19 @@
+# Blueprint de Render para el backend (FastAPI).
+# Render detecta este archivo y crea el servicio web con la configuración indicada.
+# Las claves de Supabase NO se definen aquí: se cargan manualmente en el panel de Render
+# (sync: false) para evitar versionar secretos.
+services:
+  - type: web
+    name: proyecto-ube-backend
+    runtime: python
+    plan: free
+    rootDir: Backend_UBE
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
