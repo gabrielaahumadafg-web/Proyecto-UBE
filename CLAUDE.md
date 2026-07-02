@@ -33,6 +33,7 @@ BREVO_API_KEY="xkeysib-..."                   # optional; Brevo HTTP API key for
 MAIL_FROM_EMAIL="ubenotificaciones@gmail.com" # optional; verified Brevo sender (defaults to GMAIL_USER)
 GMAIL_USER="ubenotificaciones@gmail.com"      # optional; fallback sender email
 GMAIL_FROM_NAME="UBE PUCV"                     # optional; display name (default "UBE PUCV")
+ALLOWED_ORIGINS="https://frontend.example.com,http://localhost:5173"  # optional; CORS whitelist (default: all origins)
 ```
 - Email notifications (`services/notificaciones.py`) use the **Brevo HTTP API** (`api.brevo.com`, port 443), **not** SMTP — Render blocks outbound SMTP ports (25/465/587), so Gmail SMTP times out from production. The sender (`MAIL_FROM_EMAIL`, falling back to `GMAIL_USER`) must be a **verified sender** in Brevo. If `BREVO_API_KEY` is unset, sending is skipped silently (logged) — nothing breaks.
 
@@ -72,7 +73,9 @@ Supabase Auth handles login (Google OAuth for students, email+password for staff
 Other frontend files: `FormularioMotivo.jsx` (shared triage/motive form), `HistorialEstudiante.jsx` (appointment history), `CrearUsuariosRapido.jsx` (bulk user creation tool), `src/utils/calendarUtils.js` (grid helpers), `src/config.js` (API_URL), `src/supabaseClient.js` (auth client).
 
 ### Backend routers
-Each router guards its own role via `obtener_usuario_actual`. CORS is `allow_origins=["*"]` (all origins).
+Each router guards its own role via `obtener_usuario_actual`. CORS origins come from the `ALLOWED_ORIGINS` env var (comma-separated); if unset, all origins are allowed (wildcard, without credentials — auth uses Bearer tokens, not cookies).
+
+**Ownership checks (IDOR protection):** `/cancelar` verifies the reserva belongs to the calling student (or, for `profesional`, that the block is theirs). `/profesional/asistencia` and `/profesional/evolucion` verify `bloque_horario.id_profesional` matches the caller when the role is `profesional` (admin/coordinador retain full access on asistencia). Any new endpoint that receives a resource ID must filter by the caller's `id_estudiante`/`id_profesional`, not just the role.
 
 | Router | Prefix | Responsibility |
 |--------|--------|----------------|

@@ -17,3 +17,6 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_KEY
         sync: false
+      # Opcional: whitelist de CORS separada por comas; sin definir permite todo origen.
+      - key: ALLOWED_ORIGINS
+        sync: false
