@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -5,10 +7,17 @@ from routers import publico, estudiante, profesional, coordinador, admin, report
 
 app = FastAPI(title="API Sistema de Reservas UBE")
 
+# Orígenes permitidos: lista separada por comas en la variable de entorno
+# ALLOWED_ORIGINS (ej: "https://mi-frontend.vercel.app,http://localhost:5173").
+# Sin configurar se permite cualquier origen; la auth usa Bearer tokens (no
+# cookies), así que allow_credentials no es necesario en ese caso.
+_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+_allowed_origins = [o.strip() for o in _origins_env.split(",") if o.strip()] if _origins_env else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=_allowed_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -114,12 +114,18 @@ async def cancelar_reserva(datos: CancelacionReserva, usuario_actual: dict = Dep
         raise HTTPException(status_code=403, detail="Rol no autorizado.")
     try:
         reserva_req = supabase.table("reserva").select(
-            "id_bloque, estado, id_proceso, bloque_horario(fecha_hora_inicio), proceso_clinico(id_estudiante, id_servicio, inasistencias_acumuladas)"
+            "id_bloque, estado, id_proceso, bloque_horario(fecha_hora_inicio, id_profesional), proceso_clinico(id_estudiante, id_servicio, inasistencias_acumuladas)"
         ).eq("id_reserva", datos.id_reserva).execute()
         if not reserva_req.data:
             raise HTTPException(status_code=404, detail="Reserva no encontrada.")
 
         info = reserva_req.data[0]
+        if rol_actor == "estudiante":
+            if (info.get("proceso_clinico") or {}).get("id_estudiante") != usuario_actual["id_estudiante"]:
+                raise HTTPException(status_code=403, detail="Solo puedes cancelar tus propias reservas.")
+        elif rol_actor == "profesional":
+            if (info.get("bloque_horario") or {}).get("id_profesional") != usuario_actual["id_profesional"]:
+                raise HTTPException(status_code=403, detail="Solo puedes cancelar reservas de tus propios bloques.")
         id_bloque = info["id_bloque"]
         id_proceso = info["id_proceso"]
         estado_cancelacion = "cancelado_estudiante" if rol_actor == "estudiante" else "cancelado_profesional"
@@ -158,6 +164,8 @@ async def cancelar_reserva(datos: CancelacionReserva, usuario_actual: dict = Dep
             "requiere_justificacion": id_inasistencia is not None,
             "id_inasistencia": id_inasistencia,
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

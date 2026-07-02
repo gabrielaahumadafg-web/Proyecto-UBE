@@ -63,13 +63,16 @@ async def registrar_asistencia(datos: SolicitudAsistencia, usuario_actual: dict 
         raise HTTPException(status_code=400, detail="Estado de asistencia no admitido.")
     try:
         reserva_req = supabase.table("reserva").select(
-            "id_proceso, bloque_horario(fecha_hora_inicio), "
+            "id_proceso, bloque_horario(fecha_hora_inicio, id_profesional), "
             "proceso_clinico(id_estudiante, id_servicio, inasistencias_acumuladas)"
         ).eq("id_reserva", datos.id_reserva).execute()
         if not reserva_req.data:
             raise HTTPException(status_code=404, detail="Reserva no encontrada.")
 
         info = reserva_req.data[0]
+        if usuario_actual["rol"] == "profesional":
+            if (info.get("bloque_horario") or {}).get("id_profesional") != usuario_actual["id_profesional"]:
+                raise HTTPException(status_code=403, detail="Solo puedes registrar asistencia de tus propios bloques.")
         supabase.table("reserva").update({"estado": datos.estado}).eq("id_reserva", datos.id_reserva).execute()
 
         if datos.estado in ["ausente", "atraso"]:
@@ -93,6 +96,8 @@ async def registrar_asistencia(datos: SolicitudAsistencia, usuario_actual: dict 
             )
 
         return {"mensaje": f"Asistencia procesada ({datos.estado})."}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -171,15 +176,18 @@ async def obtener_mis_atenciones(usuario_actual: dict = Depends(obtener_usuario_
 
 @router.post("/evolucion")
 async def registrar_evolucion(datos: SolicitudEvolucion, usuario_actual: dict = Depends(obtener_usuario_actual)):
-    if usuario_actual["rol"] != "profesional":
+    if usuario_actual["rol"] != "profesional" or not usuario_actual["id_profesional"]:
         raise HTTPException(status_code=403, detail="Solo profesionales pueden registrar evoluciones clínicas.")
     if datos.decision_continuidad not in ["continuar", "cerrar_proceso"]:
         raise HTTPException(status_code=400, detail="Decisión de continuidad no válida.")
 
     try:
-        reserva_req = supabase.table("reserva").select("id_proceso, proceso_clinico(id_estudiante, id_servicio, sesiones_realizadas)").eq("id_reserva", datos.id_reserva).execute()
+        reserva_req = supabase.table("reserva").select("id_proceso, bloque_horario(id_profesional), proceso_clinico(id_estudiante, id_servicio, sesiones_realizadas)").eq("id_reserva", datos.id_reserva).execute()
         if not reserva_req.data:
             raise HTTPException(status_code=404, detail="Reserva no encontrada.")
+
+        if (reserva_req.data[0].get("bloque_horario") or {}).get("id_profesional") != usuario_actual["id_profesional"]:
+            raise HTTPException(status_code=403, detail="Solo puedes registrar evoluciones de tus propias atenciones.")
 
         id_proceso = reserva_req.data[0]["id_proceso"]
         id_estudiante = reserva_req.data[0]["proceso_clinico"]["id_estudiante"]
