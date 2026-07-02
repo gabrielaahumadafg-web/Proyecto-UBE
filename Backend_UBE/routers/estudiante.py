@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from database import supabase
 from dependencies import obtener_usuario_actual
 from schemas import SolicitudReserva, SolicitudListaEspera, SolicitudActualizarDisponibilidad, CancelacionReserva, SolicitudRespuestaOferta
-from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque
+from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque, _tiene_conflicto_horario
 from services.notificaciones import notificar_reserva_directa, notificar_inasistencia_registrada
 from services.inasistencias import registrar_inasistencia, procesar_suspensiones_cumplidas
 from schemas import SolicitudJustificarInasistencia
@@ -39,6 +39,9 @@ async def reservar_bloque(solicitud: SolicitudReserva, usuario_actual: dict = De
         suspension_req = supabase.table("suspension_servicio").select("id_suspension").eq("id_estudiante", id_estudiante).eq("id_servicio", id_servicio).gt("fecha_fin", datetime.utcnow().isoformat()).execute()
         if suspension_req.data:
             raise HTTPException(status_code=403, detail="Operación denegada. Suspensión activa.")
+
+        if _tiene_conflicto_horario(id_estudiante, bloque_req.data[0]["fecha_hora_inicio"]):
+            raise HTTPException(status_code=409, detail="Ya tienes otra hora agendada a esa misma fecha y hora. Elige un horario distinto.")
 
         proceso_existente = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).eq("id_servicio", id_servicio).eq("estado", "activo").execute()
         if proceso_existente.data:
@@ -267,6 +270,9 @@ async def responder_oferta(datos: SolicitudRespuestaOferta, usuario_actual: dict
             raise HTTPException(status_code=400, detail="No se encontró el bloque ofertado.")
 
         if datos.aceptada:
+            bloque_of_req = supabase.table("bloque_horario").select("fecha_hora_inicio").eq("id_bloque", id_bloque).execute()
+            if bloque_of_req.data and _tiene_conflicto_horario(id_estudiante, bloque_of_req.data[0]["fecha_hora_inicio"]):
+                raise HTTPException(status_code=409, detail="Ya tienes otra hora agendada a esa misma fecha y hora. Rechaza la oferta o cancela la otra cita primero.")
             proceso_existente = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).eq("id_servicio", oferta["id_servicio"]).eq("estado", "activo").execute()
             if proceso_existente.data:
                 id_proceso = proceso_existente.data[0]["id_proceso"]
@@ -282,6 +288,8 @@ async def responder_oferta(datos: SolicitudRespuestaOferta, usuario_actual: dict
             supabase.table("bloque_horario").update({"estado": "disponible"}).eq("id_bloque", id_bloque).execute()
             disponibilidad.pop("bloque_ofertado", None)
             supabase.table("lista_espera").update({"estado_oferta": "esperando", "vencimiento_oferta": None, "disponibilidad_indicada": disponibilidad}).eq("id_lista", datos.id_lista).execute()
+            # El bloque rechazado queda libre: ofrecérselo de inmediato al siguiente en espera.
+            await _attempt_automatic_assignment(id_bloque)
             return {"mensaje": "Oferta rechazada. Has vuelto a la lista de espera."}
     except HTTPException as he:
         raise he

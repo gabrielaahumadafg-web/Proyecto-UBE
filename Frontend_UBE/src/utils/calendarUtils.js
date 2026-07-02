@@ -1,13 +1,16 @@
 /**
- * Retorna la fecha del lunes de la semana que contiene `d`.
+ * Retorna la fecha del lunes de la semana laboral "vigente" para `d`.
+ * Lunes a viernes → el lunes de esa misma semana. Sábado y domingo → el lunes
+ * SIGUIENTE (la grilla es lun-vie; mostrar la semana que ya terminó no sirve).
+ * Antes sábado y domingo se comportaban distinto entre sí (sábado retrocedía a la
+ * semana que estaba terminando y domingo saltaba a la siguiente).
  */
 export function getLunes(d) {
   const dt = new Date(d);
-  const day = dt.getDay();
-  // day===0 = domingo: retroceder 6 días llevaría al lunes pasado;
-  // en cambio, sumar 1 apunta al próximo lunes (mañana), que es lo esperado.
-  const diff = dt.getDate() - day + 1;
-  return new Date(dt.setDate(diff));
+  const day = dt.getDay(); // 0=domingo … 6=sábado
+  const diff = day === 0 ? 1 : (day === 6 ? 2 : 1 - day);
+  dt.setDate(dt.getDate() + diff);
+  return dt;
 }
 
 /**

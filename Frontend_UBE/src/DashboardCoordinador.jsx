@@ -1369,7 +1369,7 @@ export default function DashboardCoordinador({ session }) {
                                 {diasSemanaAgendamiento.map(dia => (
                                   <td key={`${dia}-${hora}`} className="border-2 border-gray-300 p-1 align-top bg-white">
                                     <div className="flex flex-col gap-1">
-                                      {subSlots.map(({ inicio, fin }) => {
+                                      {subSlots.map(({ inicio }) => {
                                         const estudiantesSlot = demanda.filter(est => {
                                           if (est.servicio?.id_servicio !== servicioFiltroDemanda) return false;
                                           const disp = est.disponibilidad_indicada || {};
@@ -1588,7 +1588,7 @@ export default function DashboardCoordinador({ session }) {
                                   return (
                                     <td key={`${dia}-${hora}`} className="border-2 border-gray-300 p-1 align-top bg-white">
                                       <div className="flex flex-col gap-1">
-                                        {subSlots.map(({ inicio, fin }) => {
+                                        {subSlots.map(({ inicio }) => {
                                           const reservasSlot = calendarioReservas.filter(res => {
                                             if (res.bloque_horario?.id_servicio !== servicioFiltroCalendario) return false;
                                             if (!res.bloque_horario?.fecha_hora_inicio) return false;

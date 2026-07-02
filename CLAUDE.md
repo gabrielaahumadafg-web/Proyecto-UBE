@@ -92,7 +92,7 @@ Each router guards its own role via `obtener_usuario_actual`. CORS origins come 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/usuario_actual` | any | Returns current user role + IDs |
-| POST | `/registro_estudiante` | estudiante | Complete student profile on first login |
+| POST | `/registro_estudiante` | estudiante | Complete student profile on first login. **Server-side domain check**: only `@mail.pucv.cl` emails may self-register (the App.jsx filter is UX only; staff accounts are created by the coordinator) |
 | GET | `/servicios` | public | List all services |
 | GET | `/disponibilidad` | public | Available blocks for a service (`?id_servicio=`) |
 | GET | `/profesionales_activos` | prof_apoyo, coordinador, admin | List active professionals |
@@ -148,8 +148,8 @@ Each router guards its own role via `obtener_usuario_actual`. CORS origins come 
 | GET | `/riesgo_suspension` | admin | Processes with ≥1 absence |
 | POST | `/suspender_servicio` | admin | Suspend student from service (30 days) |
 | PATCH | `/admin/reducir_inasistencia/{id_proceso}` | admin | Reduce absence count |
-| POST | `/marcar_critico` | admin | Emergency protocol (closes all procesos) |
-| POST | `/reagendar` | admin | Reschedule reservation to new block |
+| POST | `/marcar_critico` | admin | Emergency protocol: closes all procesos, cancels pending reservas (blocks → `disponible`), flags `es_caso_critico_activo` + `estado_critico=confirmado_critico` on the student, clears their lista_espera (mirrors `aprobar_critico`) |
+| POST | `/reagendar` | admin | Reschedule reservation to new block. Validates same service and schedule conflict (409) |
 | POST | `/limpiar_ofertas_vencidas` | admin | Clean up expired waitlist offers |
 | PATCH | `/admin/marcar_critico/{id_lista}` | admin | Mark waitlist entry as priority |
 | GET | `/admin/estudiantes` | admin, profesional, coordinador | List students (profesional: only own patients) |
@@ -195,13 +195,13 @@ Each router guards its own role via `obtener_usuario_actual`. CORS origins come 
 - **`_seleccionar_mejor_bloque(candidatos)`** — among multiple available blocks at the same day+time, picks the one whose professional has the lowest occupancy ratio (load balancing). The ratio counts **only future blocks** (`fecha_hora_inicio >= now`) and uses the same "occupied" definition as the reports (`estado not in ["disponible", "huerfano", "cancelado"]`) — so cancelled blocks no longer inflate a professional's apparent load. This matches the `/reportes/ocupacion` methodology.
 - **`_attempt_automatic_assignment(id_bloque)`** — called when a block is freed (cancellation/admin deletion). Finds the highest-priority waitlisted student whose `disponibilidad_indicada` matches the block's day+time. Skips blocks within 12 hours. If student already has a pending reserva for the same service, cancels it (`cancelado_sistema_mejora`) and assigns the new block instead (upgrade logic). Recursively tries to fill any newly freed blocks.
 - **`_attempt_automatic_assignment_for_student(id_lista)`** — called immediately when a student joins the waitlist. Searches available blocks matching their `disponibilidad_indicada`. Same upgrade logic applies.
-- **`_tiene_conflicto_horario(id_estudiante, fecha_hora_inicio_iso)`** — checks whether a student already has any active (non-cancelled) reservation at the exact datetime across any service, to prevent double-booking.
+- **`_tiene_conflicto_horario(id_estudiante, fecha_hora_inicio_iso, id_reserva_excluir=None)`** — checks whether a student already has any active (non-cancelled) reservation at the exact datetime across any service, to prevent double-booking. **Enforced everywhere**: `/reservar`, `/responder_oferta`, `/asignar_hora_manual`, `/admin/agendar_hora` and `/reagendar` raise **409** on conflict (`/reagendar` passes `id_reserva_excluir` so the reservation being moved doesn't count against itself); both automatic-assignment functions *skip* the conflicting candidate/slot; professional derivations skip the direct booking (falling back to waitlist or a warning in the response message). Any new booking flow must call it.
 
 ### Waitlist availability format
 `disponibilidad_indicada` is stored as `{ "dia": ["HH:MM", ...] }` — e.g., `{ "lunes": ["08:20", "08:40"] }`. The matching in `asignacion.py` does an exact string match on `hora_str = fecha_hora_inicio.strftime("%H:%M")`. For sub-hourly services (e.g., 20-min Medicina General), the frontend must store the exact slot start times, not just the hour.
 
-### Waitlist offers system
-When the system finds a match for a waitlisted student via `_attempt_automatic_assignment`, it can transition the `lista_espera` entry to an **ofertado** state and notify the student. The student then calls `POST /responder_oferta` with `aceptada: true/false`. Expired offers are cleaned by `POST /limpiar_ofertas_vencidas`.
+### Waitlist offers system (dormant)
+The `estado_oferta='ofertado'` state, `POST /responder_oferta` and `POST /limpiar_ofertas_vencidas` exist but **nothing currently writes `ofertado`** — `_attempt_automatic_assignment` books directly instead of offering. The endpoints are kept (and hardened: accepting checks schedule conflicts, rejecting re-triggers automatic assignment on the freed block) in case the offer flow is reactivated, but today they are unreachable dead paths.
 
 ### Email notifications (`services/notificaciones.py`)
 Two trigger families email the student:
@@ -257,7 +257,7 @@ Blocks can be tagged with a physical campus/sede. `bloque_horario.id_ubicacion` 
 - **Student booking (`AgendarHora.jsx`):** after picking a service, a "¿Qué campus te sirven?" multi-select chip filter (shown only when >1 campus has availability) narrows the grid. **The grid cell shows only "Disponible"** (not a campus name) — a single time slot may have blocks in several campus. Clicking a cell calls `abrirSeleccionSlot`, which groups that slot's blocks by campus (one representative each); if one campus it preselects it, if several the Paso 4 confirmation screen shows a "Selecciona el campus" picker and gates "Confirmar Cita" until one is chosen. (Bug history: the cell used `.find()` and silently reserved only the first campus, hiding the others — now it uses `.filter()`.)
 
 ### Frontend calendar utilities (`src/utils/calendarUtils.js`)
-- `getLunes(d)` — returns Monday of the week containing `d`.
+- `getLunes(d)` — returns Monday of the current working week; on Saturday/Sunday it returns the **next** Monday (grids are Mon–Fri, so the ending week is useless).
 - `getBlocksForCell(blocks, fechaBase, diaIndex, hora)` — filters blocks for a grid cell by matching date and **hour prefix only** (`split(':')[0]`), so all sub-hourly blocks within an hour appear in the same row.
 - `deduplicateCyclicBlocks(blocks, isCyclic)` — for cyclic services, collapses the weekly series to show only the first occurrence per (day, time, professional) combination.
 
@@ -321,6 +321,10 @@ One `proceso_clinico` per (estudiante, servicio) while active. A student can re-
 Two Supabase client instances:
 - `supabase` — uses `SERVICE_KEY` if available, else falls back to anon `SUPABASE_KEY`. Used for most operations.
 - `supabase_admin` — uses `SERVICE_KEY` only (None if not configured). Required for `crear_usuario`.
+
+**Row-limit rule (critical):** PostgREST caps every response at **1000 rows** and truncates silently. Any query whose result set grows over time (blocks, reservations, reports) must use `fetch_all(lambda: <query-without-execute>)` from `database.py`, which paginates with `.range()`. For `.in_()` filters over large id lists use `in_chunks(ids)` (batches of 200) to avoid giant URLs — or better, avoid the id-list entirely with a PostgREST inner-join filter: `select("..., bloque_horario!inner(id_profesional)")` + `.eq("bloque_horario.id_profesional", x)` filters parent rows by an embedded column (used in `/profesional/mis_atenciones`, `/admin/estudiantes`, `/admin/sesiones_sin_registrar`, `/reportes/asistencias`, `/reportes/reservas_detalle`).
+
+Report endpoints normalize date-only `fecha_fin` params to `T23:59:59` (`_fin_dia` in `reportes.py`) so the range includes the whole end day.
 
 ## Deployment
 - **Frontend:** Vercel — auto-deploys from `main` branch. Environment variables set in Vercel dashboard.

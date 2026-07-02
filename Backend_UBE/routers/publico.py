@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials
-from database import supabase
+from database import supabase, fetch_all
 from dependencies import security, obtener_usuario_actual
 from schemas import SolicitudRegistroEstudiante
 from utils_tiempo import ahora_chile
@@ -23,6 +23,14 @@ async def registrar_estudiante_nuevo(datos: SolicitudRegistroEstudiante, credent
             raise HTTPException(status_code=401, detail="Token inválido o expirado.")
 
         user_email = auth_response.user.email
+
+        # Validación de dominio en el servidor: el filtro del frontend es solo UX
+        # (cualquiera con un token de Google válido podría llamar este endpoint directo).
+        # Solo correos institucionales de estudiante pueden auto-registrarse; el personal
+        # se crea desde el panel del coordinador.
+        if not user_email.endswith("@mail.pucv.cl"):
+            raise HTTPException(status_code=403, detail="Solo correos @mail.pucv.cl pueden registrarse como estudiantes. El personal debe ser creado por coordinación.")
+
         check_req = supabase.table("usuario").select("id_usuario").eq("email", user_email).execute()
         if check_req.data:
             id_user = check_req.data[0]["id_usuario"]
@@ -78,15 +86,17 @@ async def obtener_disponibilidad(id_servicio: str = Query(...)):
         ahora_local = ahora_chile()
         ahora_str = ahora_local.isoformat()
 
-        query = supabase.table("bloque_horario").select(
-            "id_bloque, fecha_hora_inicio, fecha_hora_fin, profesional(nombres, apellidos), ubicacion(id_ubicacion, nombre)"
-        ).eq("id_servicio", id_servicio).eq("estado", "disponible").gt("fecha_hora_inicio", ahora_str)
+        def query():
+            q = supabase.table("bloque_horario").select(
+                "id_bloque, fecha_hora_inicio, fecha_hora_fin, profesional(nombres, apellidos), ubicacion(id_ubicacion, nombre)"
+            ).eq("id_servicio", id_servicio).eq("estado", "disponible").gt("fecha_hora_inicio", ahora_str)
+            if es_ciclico:
+                q = q.lte("fecha_hora_inicio", (ahora_local + timedelta(days=14)).isoformat())
+            return q
 
-        if es_ciclico:
-            query = query.lte("fecha_hora_inicio", (ahora_local + timedelta(days=14)).isoformat())
-
-        respuesta = query.execute()
-        return respuesta.data
+        # Paginado: un servicio sub-horario acumula miles de bloques al año; sin esto
+        # PostgREST trunca en 1000 filas y hay disponibilidad que nunca se muestra.
+        return fetch_all(query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

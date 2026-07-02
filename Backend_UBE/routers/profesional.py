@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query
-from database import supabase
+from database import supabase, fetch_all, in_chunks
 from dependencies import obtener_usuario_actual
 from schemas import SolicitudAsistencia, SolicitudEvolucion
-from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque, extender_serie_ciclica, liberar_retencion_slot
+from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque, _tiene_conflicto_horario, extender_serie_ciclica, liberar_retencion_slot
 from services.notificaciones import notificar_reserva_directa, notificar_inasistencia_registrada
 from services.inasistencias import registrar_inasistencia
 from services.triage import _construir_motivo_caso_critico
@@ -28,14 +28,14 @@ async def obtener_mis_bloques(usuario_actual: dict = Depends(obtener_usuario_act
     if usuario_actual["rol"] != "profesional" or not usuario_actual["id_profesional"]:
         raise HTTPException(status_code=403, detail="Exclusivo para profesionales.")
     try:
-        bloques_req = supabase.table("bloque_horario").select(
+        bloques = fetch_all(lambda: supabase.table("bloque_horario").select(
             "id_bloque, id_servicio, fecha_hora_inicio, fecha_hora_fin, estado, servicio(nombre, acronimo), "
             "ubicacion(id_ubicacion, nombre, abreviatura), "
             "reserva(estado, proceso_clinico(estudiante(nombres, apellidos)))"
-        ).eq("id_profesional", usuario_actual["id_profesional"]).execute()
+        ).eq("id_profesional", usuario_actual["id_profesional"]))
 
         resultados = []
-        for b in bloques_req.data:
+        for b in bloques:
             est_nombres = est_apellidos = None
             for r in (b.get("reserva") or []):
                 if r.get("estado") in ["pendiente", "presente"]:
@@ -108,28 +108,29 @@ async def obtener_mis_atenciones(usuario_actual: dict = Depends(obtener_usuario_
         raise HTTPException(status_code=403, detail="Exclusivo para profesionales.")
     try:
         ahora_str = ahora_chile().isoformat()
-        bloques_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio, id_servicio, servicio(nombre, es_ciclico, tope_sesiones)").eq("id_profesional", usuario_actual["id_profesional"]).lte("fecha_hora_inicio", ahora_str).execute()
-        if not bloques_req.data:
-            return []
-
-        bloques_dict = {b["id_bloque"]: b for b in bloques_req.data}
-        id_bloques = list(bloques_dict.keys())
-        reservas_req = supabase.table("reserva").select("id_reserva, id_bloque, id_proceso, proceso_clinico(sesiones_realizadas, estudiante(nombres, apellidos))").in_("estado", ["pendiente", "presente"]).in_("id_bloque", id_bloques).execute()
+        # Una sola consulta con join !inner filtrado por profesional y fecha: evita traer
+        # miles de ids de bloques (URL gigante) y el tope de 1000 filas de PostgREST.
+        reservas_rows = fetch_all(lambda: supabase.table("reserva").select(
+            "id_reserva, id_bloque, id_proceso, proceso_clinico(sesiones_realizadas, estudiante(nombres, apellidos)), "
+            "bloque_horario!inner(fecha_hora_inicio, id_servicio, id_profesional, servicio(nombre, es_ciclico, tope_sesiones))"
+        ).in_("estado", ["pendiente", "presente"]).eq(
+            "bloque_horario.id_profesional", usuario_actual["id_profesional"]
+        ).lte("bloque_horario.fecha_hora_inicio", ahora_str))
 
         # Excluir de forma robusta las reservas que ya tienen evolución (consulta explícita,
         # sin depender del embed anidado que puede devolver null silenciosamente).
-        ids_reservas = [r["id_reserva"] for r in reservas_req.data]
+        ids_reservas = [r["id_reserva"] for r in reservas_rows]
         reservas_con_evolucion = set()
-        if ids_reservas:
-            evol_req = supabase.table("evolucion_clinica").select("id_reserva").in_("id_reserva", ids_reservas).execute()
-            reservas_con_evolucion = {e["id_reserva"] for e in (evol_req.data or [])}
+        for lote in in_chunks(ids_reservas):
+            evol_req = supabase.table("evolucion_clinica").select("id_reserva").in_("id_reserva", lote).execute()
+            reservas_con_evolucion.update(e["id_reserva"] for e in (evol_req.data or []))
 
         # Fecha de la última sesión reservada (no cancelada) de cada proceso, para detectar cuándo
         # esta atención es la última del ciclo (y ofrecer al profesional agregar más sesiones).
-        ids_procesos = list({r.get("id_proceso") for r in reservas_req.data if r.get("id_proceso")})
+        ids_procesos = list({r.get("id_proceso") for r in reservas_rows if r.get("id_proceso")})
         max_fecha_proceso = {}
-        if ids_procesos:
-            todas_req = supabase.table("reserva").select("id_proceso, estado, bloque_horario(fecha_hora_inicio)").in_("id_proceso", ids_procesos).execute()
+        for lote in in_chunks(ids_procesos):
+            todas_req = supabase.table("reserva").select("id_proceso, estado, bloque_horario(fecha_hora_inicio)").in_("id_proceso", lote).execute()
             for rr in (todas_req.data or []):
                 if (rr.get("estado") or "").startswith("cancelado"):
                     continue
@@ -141,10 +142,10 @@ async def obtener_mis_atenciones(usuario_actual: dict = Depends(obtener_usuario_
                     max_fecha_proceso[pid] = fh
 
         atenciones = []
-        for r in reservas_req.data:
+        for r in reservas_rows:
             if r["id_reserva"] in reservas_con_evolucion:
                 continue
-            b = bloques_dict[r["id_bloque"]]
+            b = r.get("bloque_horario") or {}
             proc = r.get("proceso_clinico") or {}
             est = proc.get("estudiante") or {}
             serv = b.get("servicio") or {}
@@ -340,6 +341,9 @@ async def registrar_evolucion(datos: SolicitudEvolucion, usuario_actual: dict = 
 
                     if id_bloque:
                         bloque_req = supabase.table("bloque_horario").select("fecha_hora_inicio, id_ubicacion").eq("id_bloque", id_bloque).execute()
+                        if bloque_req.data and _tiene_conflicto_horario(id_estudiante, bloque_req.data[0]["fecha_hora_inicio"]):
+                            mensaje_derivacion += f" [{idx+1}] ⚠ No se agendó {derivacion.get('nombre_servicio', servicio_id)}: el estudiante ya tiene otra hora a esa misma fecha/hora. Agéndala manualmente en otro horario."
+                            continue
                         if bloque_req.data:
                             candidatos_q = supabase.table("bloque_horario").select("id_bloque, id_profesional").eq("id_servicio", servicio_id).eq("fecha_hora_inicio", bloque_req.data[0]["fecha_hora_inicio"]).eq("estado", "disponible")
                             id_ubicacion_bloque = bloque_req.data[0].get("id_ubicacion")
@@ -373,7 +377,14 @@ async def registrar_evolucion(datos: SolicitudEvolucion, usuario_actual: dict = 
                 # Flujo legacy de compatibilidad
                 motivo = f"Derivación interna. Ref. Evolución: {evolucion_ins.data[0].get('id_evolucion', 'N/A')}"
                 primer_servicio = datos.id_servicios_derivacion[0]
+                # Si el bloque elegido choca con otra hora del estudiante, se omite el
+                # agendamiento directo y la derivación cae al camino de lista de espera.
+                bloque_deriv_ok = True
                 if datos.id_bloque_derivacion:
+                    b_chk = supabase.table("bloque_horario").select("fecha_hora_inicio").eq("id_bloque", datos.id_bloque_derivacion).execute()
+                    if b_chk.data and _tiene_conflicto_horario(id_estudiante, b_chk.data[0]["fecha_hora_inicio"]):
+                        bloque_deriv_ok = False
+                if datos.id_bloque_derivacion and bloque_deriv_ok:
                     proceso_existente = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).eq("id_servicio", primer_servicio).eq("estado", "activo").execute()
                     if proceso_existente.data:
                         id_proceso_nuevo = proceso_existente.data[0]["id_proceso"]

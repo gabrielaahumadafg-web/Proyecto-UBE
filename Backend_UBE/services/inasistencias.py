@@ -9,7 +9,7 @@ o cuando vence el plazo sin que el estudiante justifique. Las faltas son las que
 habilitan la suspensión (a partir de 2).
 """
 from datetime import datetime, timedelta
-from database import supabase
+from database import supabase, fetch_all
 from services.asignacion import _agendar_reposicion_ciclica
 from services.notificaciones import notificar_resolucion_justificacion
 
@@ -103,10 +103,10 @@ def procesar_suspensiones_cumplidas():
     """
     try:
         ahora_iso = datetime.utcnow().isoformat()
-        req = supabase.table("suspension_servicio").select(
+        vencidas = fetch_all(lambda: supabase.table("suspension_servicio").select(
             "id_suspension, id_estudiante, id_servicio, fecha_fin"
-        ).lt("fecha_fin", ahora_iso).execute()
-        for s in (req.data or []):
+        ).lt("fecha_fin", ahora_iso))
+        for s in vencidas:
             reiniciar_faltas_servicio(s["id_estudiante"], s["id_servicio"], s.get("fecha_fin"))
             supabase.table("suspension_servicio").delete().eq(
                 "id_suspension", s["id_suspension"]
@@ -122,10 +122,10 @@ def procesar_inasistencias_vencidas():
     """
     try:
         ahora_iso = datetime.utcnow().isoformat()
-        req = supabase.table("inasistencia").select("id_inasistencia, id_proceso").eq(
+        vencidas = fetch_all(lambda: supabase.table("inasistencia").select("id_inasistencia, id_proceso").eq(
             "estado", "pendiente_justificacion"
-        ).lt("fecha_limite_justificacion", ahora_iso).execute()
-        for fila in (req.data or []):
+        ).lt("fecha_limite_justificacion", ahora_iso))
+        for fila in vencidas:
             supabase.table("inasistencia").update({"estado": "vencida_sin_justificar"}).eq(
                 "id_inasistencia", fila["id_inasistencia"]
             ).execute()

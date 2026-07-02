@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from database import supabase
+from database import supabase, fetch_all
 from services.notificaciones import notificar_asignacion_automatica, notificar_reserva_directa
 from utils_tiempo import ahora_chile
 
@@ -11,9 +11,9 @@ def _seleccionar_mejor_bloque(candidatos: list) -> str:
     ids_profesionales = list(set(c["id_profesional"] for c in candidatos))
     # Sólo bloques futuros: el balanceo reparte carga próxima, no historial pasado.
     ahora_iso = ahora_chile().isoformat()
-    stats_req = supabase.table("bloque_horario").select("id_profesional, estado").in_("id_profesional", ids_profesionales).gte("fecha_hora_inicio", ahora_iso).execute()
+    stats = fetch_all(lambda: supabase.table("bloque_horario").select("id_profesional, estado").in_("id_profesional", ids_profesionales).gte("fecha_hora_inicio", ahora_iso))
     ocupacion = {}
-    for stat in stats_req.data:
+    for stat in stats:
         prof = stat["id_profesional"]
         if prof not in ocupacion:
             ocupacion[prof] = {"total": 0, "ocupados": 0}
@@ -29,17 +29,23 @@ def _seleccionar_mejor_bloque(candidatos: list) -> str:
     return sorted(candidatos, key=ratio)[0]["id_bloque"]
 
 
-def _tiene_conflicto_horario(id_estudiante: str, fecha_hora_inicio_iso: str) -> bool:
-    """Returns True if the student already has an active (non-cancelled) reservation at the given datetime."""
+def _tiene_conflicto_horario(id_estudiante: str, fecha_hora_inicio_iso: str, id_reserva_excluir: str = None) -> bool:
+    """True si el estudiante ya tiene una reserva activa (no cancelada) a esa fecha/hora
+    exacta, en cualquier servicio. `id_reserva_excluir` permite ignorar una reserva
+    concreta (p. ej. la que se está reagendando)."""
     target = fecha_hora_inicio_iso.replace("Z", "").replace(" ", "T")[:19]
-    procesos = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).eq("estado", "activo").execute()
+    # Todos los procesos del estudiante (no solo activos): una reserva pendiente de un
+    # proceso cerrado igualmente ocupa al estudiante a esa hora.
+    procesos = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).execute()
     if not procesos.data:
         return False
     id_procesos = [p["id_proceso"] for p in procesos.data]
-    reservas = supabase.table("reserva").select(
-        "estado, bloque_horario(fecha_hora_inicio)"
-    ).in_("id_proceso", id_procesos).execute()
-    for res in reservas.data:
+    reservas = fetch_all(lambda: supabase.table("reserva").select(
+        "id_reserva, estado, bloque_horario(fecha_hora_inicio)"
+    ).in_("id_proceso", id_procesos))
+    for res in reservas:
+        if id_reserva_excluir and res.get("id_reserva") == id_reserva_excluir:
+            continue
         if res["estado"].startswith("cancelado"):
             continue
         bh = res.get("bloque_horario") or {}
@@ -79,10 +85,10 @@ async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str):
         # aplica la creación de bloques en coordinador.py.
         fin_anio = datetime(fecha_bloque_dt.year, 12, 31, 23, 59, 59)
 
-        futuros_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq("id_profesional", id_profesional).eq("id_servicio", id_servicio).eq("estado", "disponible").gte("fecha_hora_inicio", fecha_bloque_dt.isoformat()).lte("fecha_hora_inicio", fin_anio.isoformat()).execute()
+        futuros = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq("id_profesional", id_profesional).eq("id_servicio", id_servicio).eq("estado", "disponible").gte("fecha_hora_inicio", fecha_bloque_dt.isoformat()).lte("fecha_hora_inicio", fin_anio.isoformat()))
 
         bloques_slot = [
-            b for b in futuros_req.data
+            b for b in futuros
             if datetime.fromisoformat(b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).time() == hora
             and datetime.fromisoformat(b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).weekday() == dow
         ]
@@ -169,14 +175,14 @@ async def _agendar_reposicion_ciclica(id_proceso: str, id_reserva_origen: str):
 
     # Incluye los bloques retenidos ('huerfano') del propio slot del estudiante: la reposición
     # extiende su serie usando el cupo recurrente que se le reservó.
-    candidatos_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
+    candidatos_rows = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
         "id_profesional", id_profesional
     ).eq("id_servicio", id_servicio).in_("estado", ["disponible", "huerfano"]).gt(
         "fecha_hora_inicio", ultima_fecha.isoformat()
-    ).lte("fecha_hora_inicio", fin_anio.isoformat()).execute()
+    ).lte("fecha_hora_inicio", fin_anio.isoformat()))
 
     candidatos = [
-        c for c in (candidatos_req.data or [])
+        c for c in candidatos_rows
         if datetime.fromisoformat(c["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).time() == hora
         and datetime.fromisoformat(c["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).weekday() == dow
     ]
@@ -244,14 +250,14 @@ async def extender_serie_ciclica(id_proceso: str, n_sesiones: int):
     dow = ultima_fecha.weekday()
     fin_anio = datetime(ultima_fecha.year, 12, 31, 23, 59, 59)
 
-    candidatos_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
+    candidatos_rows = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
         "id_profesional", id_profesional
     ).eq("id_servicio", id_servicio).in_("estado", ["huerfano", "disponible"]).gt(
         "fecha_hora_inicio", ultima_fecha.isoformat()
-    ).lte("fecha_hora_inicio", fin_anio.isoformat()).execute()
+    ).lte("fecha_hora_inicio", fin_anio.isoformat()))
 
     candidatos = [
-        c for c in (candidatos_req.data or [])
+        c for c in candidatos_rows
         if datetime.fromisoformat(c["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).time() == hora
         and datetime.fromisoformat(c["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).weekday() == dow
     ]
@@ -297,14 +303,14 @@ async def liberar_retencion_slot(id_bloque_referencia: str):
         fin_anio = datetime(fecha_ref.year, 12, 31, 23, 59, 59)
         ahora_iso = ahora_chile().isoformat()
 
-        retenidos_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
+        retenidos = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq(
             "id_profesional", id_profesional
         ).eq("id_servicio", id_servicio).eq("estado", "huerfano").gt(
             "fecha_hora_inicio", ahora_iso
-        ).lte("fecha_hora_inicio", fin_anio.isoformat()).execute()
+        ).lte("fecha_hora_inicio", fin_anio.isoformat()))
 
         liberar = [
-            r for r in (retenidos_req.data or [])
+            r for r in retenidos
             if datetime.fromisoformat(r["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).time() == hora
             and datetime.fromisoformat(r["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).weekday() == dow
         ]
@@ -386,6 +392,10 @@ async def _attempt_automatic_assignment(id_bloque_disponible: str):
                 if est_req.data and est_req.data[0].get("es_caso_critico_activo"):
                     supabase.table("lista_espera").delete().eq("id_lista", estudiante["id_lista"]).execute()
                     continue
+                # No doble-citar: si ya tiene otra hora (cualquier servicio) a esa misma
+                # fecha/hora, se salta a este estudiante y se prueba con el siguiente.
+                if _tiene_conflicto_horario(estudiante["id_estudiante"], bloque_data["fecha_hora_inicio"]):
+                    continue
                 estudiante_asignado = estudiante
                 id_lista_asignada = estudiante["id_lista"]
                 break
@@ -457,14 +467,14 @@ async def _attempt_automatic_assignment_for_student(id_lista: str):
             return False
 
         doce_horas_mas = (ahora_chile() + timedelta(hours=12)).isoformat()
-        bloques_req = supabase.table("bloque_horario").select("id_bloque, id_profesional, fecha_hora_inicio, id_ubicacion").eq("id_servicio", id_servicio).eq("estado", "disponible").gt("fecha_hora_inicio", doce_horas_mas).order("fecha_hora_inicio", desc=False).execute()
-        if not bloques_req.data:
+        bloques_disp = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, id_profesional, fecha_hora_inicio, id_ubicacion").eq("id_servicio", id_servicio).eq("estado", "disponible").gt("fecha_hora_inicio", doce_horas_mas).order("fecha_hora_inicio", desc=False))
+        if not bloques_disp:
             return False
 
         dias_semana_map = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
 
         bloques_agrupados = {}
-        for b in bloques_req.data:
+        for b in bloques_disp:
             fh = b["fecha_hora_inicio"]
             if fh not in bloques_agrupados:
                 bloques_agrupados[fh] = []
@@ -479,6 +489,10 @@ async def _attempt_automatic_assignment_for_student(id_lista: str):
                 candidatos = [c for c in bloques_agrupados[fh] if _campus_aceptado_slot(
                     c.get("id_ubicacion"), dia_str, hora_str, campus_por_slot, campus_indicados)]
                 if not candidatos:
+                    continue
+                # No doble-citar: si ya tiene otra hora a esa misma fecha/hora
+                # (cualquier servicio), se prueba con el siguiente horario disponible.
+                if _tiene_conflicto_horario(estudiante["id_estudiante"], fh):
                     continue
                 id_bloque_final = _seleccionar_mejor_bloque(candidatos)
 
@@ -585,10 +599,10 @@ async def reagendar_serie_ciclica(id_proceso: str, id_bloque_nuevo: str):
     dow = fecha_dt.weekday()
     fin_anio = datetime(fecha_dt.year, 12, 31, 23, 59, 59)
 
-    futuros_req = supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq("id_profesional", id_profesional).eq("id_servicio", id_servicio).eq("estado", "disponible").gte("fecha_hora_inicio", fecha_dt.isoformat()).lte("fecha_hora_inicio", fin_anio.isoformat()).execute()
+    futuros = fetch_all(lambda: supabase.table("bloque_horario").select("id_bloque, fecha_hora_inicio").eq("id_profesional", id_profesional).eq("id_servicio", id_servicio).eq("estado", "disponible").gte("fecha_hora_inicio", fecha_dt.isoformat()).lte("fecha_hora_inicio", fin_anio.isoformat()))
 
     bloques_slot = [
-        b2 for b2 in futuros_req.data
+        b2 for b2 in futuros
         if datetime.fromisoformat(b2["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).time() == hora
         and datetime.fromisoformat(b2["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")).weekday() == dow
     ]

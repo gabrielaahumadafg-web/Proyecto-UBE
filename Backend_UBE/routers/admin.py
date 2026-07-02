@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends
-from database import supabase
+from database import supabase, fetch_all, in_chunks
 from dependencies import obtener_usuario_actual
 from schemas import (SolicitudAsignacionManual, SolicitudSuspension,
                      SolicitudCritico, SolicitudReagendamiento, SolicitudCambiarSerie,
@@ -8,7 +8,7 @@ from schemas import (SolicitudAsignacionManual, SolicitudSuspension,
                      SolicitudCancelarReservaAdmin, SolicitudAgendarHoraAdmin,
                      SolicitudResolverJustificacion, SolicitudJustificarDirecto,
                      SolicitudLevantarSuspension)
-from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque, reagendar_serie_ciclica, cancelar_serie_a_lista_espera
+from services.asignacion import _procesar_reserva_bloques, _attempt_automatic_assignment, _attempt_automatic_assignment_for_student, _seleccionar_mejor_bloque, _tiene_conflicto_horario, reagendar_serie_ciclica, cancelar_serie_a_lista_espera
 from services.notificaciones import notificar_reserva_directa, notificar_suspension
 from services.inasistencias import (procesar_inasistencias_vencidas, resolver_inasistencia,
                                     procesar_suspensiones_cumplidas, reiniciar_faltas_servicio)
@@ -27,12 +27,12 @@ async def obtener_lista_espera_admin(usuario_actual: dict = Depends(obtener_usua
     if usuario_actual["rol"] != "administrativo":
         raise HTTPException(status_code=403, detail="Exclusivo administrativo.")
     try:
-        req = supabase.table("lista_espera").select(
+        filas = fetch_all(lambda: supabase.table("lista_espera").select(
             "id_lista, id_servicio, fecha_ingreso, es_prioritario, disponibilidad_indicada, "
             "motivo_consulta, estado_oferta, estado_revision, estudiante(nombres, apellidos, rut, carrera), servicio(nombre)"
-        ).eq("estado_revision", "pendiente").execute()
+        ).eq("estado_revision", "pendiente"))
         resultados = []
-        for item in req.data:
+        for item in filas:
             est = item.get("estudiante") or {}
             resultados.append({
                 "id_lista": item["id_lista"],
@@ -65,11 +65,13 @@ async def asignar_hora_manual(datos: SolicitudAsignacionManual, usuario_actual: 
             raise HTTPException(status_code=404, detail="Registro en lista de espera no encontrado.")
         espera = lista_req.data[0]
 
-        bloque_req = supabase.table("bloque_horario").select("estado, id_servicio").eq("id_bloque", datos.id_bloque).execute()
+        bloque_req = supabase.table("bloque_horario").select("estado, id_servicio, fecha_hora_inicio").eq("id_bloque", datos.id_bloque).execute()
         if not bloque_req.data or bloque_req.data[0]["estado"] != "disponible":
             raise HTTPException(status_code=400, detail="Bloque no disponible.")
         if bloque_req.data[0]["id_servicio"] != espera["id_servicio"]:
             raise HTTPException(status_code=400, detail="El bloque no corresponde al servicio.")
+        if _tiene_conflicto_horario(espera["id_estudiante"], bloque_req.data[0]["fecha_hora_inicio"]):
+            raise HTTPException(status_code=409, detail="El estudiante ya tiene otra hora agendada a esa misma fecha y hora.")
 
         proceso_existente = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", espera["id_estudiante"]).eq("id_servicio", espera["id_servicio"]).eq("estado", "activo").execute()
         if proceso_existente.data:
@@ -98,11 +100,11 @@ async def obtener_riesgo_suspension(usuario_actual: dict = Depends(obtener_usuar
         # promover a falta las inasistencias con plazo vencido.
         procesar_suspensiones_cumplidas()
         procesar_inasistencias_vencidas()
-        req = supabase.table("proceso_clinico").select(
+        filas = fetch_all(lambda: supabase.table("proceso_clinico").select(
             "id_proceso, inasistencias_acumuladas, faltas_acumuladas, estado, estudiante(nombres, apellidos, rut), servicio(nombre)"
-        ).gte("faltas_acumuladas", 1).eq("estado", "activo").execute()
+        ).gte("faltas_acumuladas", 1).eq("estado", "activo"))
         resultados = []
-        for item in req.data:
+        for item in filas:
             est = item.get("estudiante") or {}
             resultados.append({
                 "id_proceso": item["id_proceso"],
@@ -126,12 +128,12 @@ async def obtener_justificaciones_pendientes(usuario_actual: dict = Depends(obte
     try:
         procesar_suspensiones_cumplidas()
         procesar_inasistencias_vencidas()
-        req = supabase.table("inasistencia").select(
+        filas = fetch_all(lambda: supabase.table("inasistencia").select(
             "id_inasistencia, tipo, estado, motivo_estudiante, fecha_inasistencia, "
             "fecha_justificacion, estudiante(nombres, apellidos, rut), servicio(nombre)"
-        ).eq("estado", "pendiente_justificacion").execute()
+        ).eq("estado", "pendiente_justificacion"))
         resultados = []
-        for it in (req.data or []):
+        for it in filas:
             if not it.get("motivo_estudiante"):
                 continue  # solo las que el estudiante ya justificó (esperando revisión)
             est = it.get("estudiante") or {}
@@ -243,14 +245,14 @@ async def obtener_suspensiones_activas(usuario_actual: dict = Depends(obtener_us
     try:
         # Reiniciar faltas de las suspensiones ya cumplidas antes de listar las activas.
         procesar_suspensiones_cumplidas()
-        req = supabase.table("suspension_servicio").select(
+        filas = fetch_all(lambda: supabase.table("suspension_servicio").select(
             "id_suspension, id_estudiante, id_servicio, fecha_fin, "
             "estudiante(nombres, apellidos, rut), servicio(nombre)"
-        ).gt("fecha_fin", datetime.utcnow().isoformat()).execute()
+        ).gt("fecha_fin", datetime.utcnow().isoformat()))
 
         # Agrupar por estudiante: un estudiante puede estar suspendido de varios servicios.
         estudiantes = {}
-        for s in (req.data or []):
+        for s in filas:
             est = s.get("estudiante") or {}
             id_est = s["id_estudiante"]
             if id_est not in estudiantes:
@@ -328,11 +330,22 @@ async def activar_protocolo_critico(solicitud: SolicitudCritico, usuario_actual:
         todos_procesos_req = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).execute()
         if todos_procesos_req.data:
             ids_procesos = [p["id_proceso"] for p in todos_procesos_req.data]
-            supabase.table("proceso_clinico").update({"es_caso_critico": True, "estado": "cerrado"}).in_("id_proceso", ids_procesos).execute()
+            supabase.table("proceso_clinico").update({"es_caso_critico": True, "estado": "cerrado", "estado_revision": "revisado"}).in_("id_proceso", ids_procesos).execute()
             reservas_req = supabase.table("reserva").select("id_reserva, id_bloque").in_("id_proceso", ids_procesos).eq("estado", "pendiente").execute()
             if reservas_req.data:
                 supabase.table("reserva").update({"estado": "cancelado_protocolo_critico"}).in_("id_reserva", [r["id_reserva"] for r in reservas_req.data]).execute()
-                supabase.table("bloque_horario").update({"estado": "huerfano"}).in_("id_bloque", [r["id_bloque"] for r in reservas_req.data]).execute()
+                # Los bloques vuelven a estar disponibles para otros estudiantes
+                # (mismo criterio que aprobar_critico y el flujo del profesional).
+                supabase.table("bloque_horario").update({"estado": "disponible"}).in_("id_bloque", [r["id_bloque"] for r in reservas_req.data]).execute()
+
+        # Marcar al estudiante como caso crítico activo: sale del sistema de agendamiento
+        # (la asignación automática lo salta) igual que en los otros dos flujos críticos.
+        supabase.table("estudiante").update({
+            "es_caso_critico_activo": True,
+            "estado_critico": "confirmado_critico",
+            "fecha_marcado_critico": datetime.now().isoformat()
+        }).eq("id_estudiante", id_estudiante).execute()
+        supabase.table("lista_espera").delete().eq("id_estudiante", id_estudiante).execute()
 
         return {"mensaje": "Protocolo de emergencia activado."}
     except HTTPException as he:
@@ -346,15 +359,23 @@ async def reagendar_reserva(datos: SolicitudReagendamiento, usuario_actual: dict
     if usuario_actual["rol"] != "administrativo":
         raise HTTPException(status_code=403, detail="Exclusivo administrativo.")
     try:
-        reserva_original_req = supabase.table("reserva").select("id_proceso, id_bloque").eq("id_reserva", datos.id_reserva_original).execute()
+        reserva_original_req = supabase.table("reserva").select(
+            "id_proceso, id_bloque, bloque_horario(id_servicio), proceso_clinico(id_estudiante)"
+        ).eq("id_reserva", datos.id_reserva_original).execute()
         if not reserva_original_req.data:
             raise HTTPException(status_code=404, detail="Reserva original no encontrada.")
         id_proceso = reserva_original_req.data[0]["id_proceso"]
         id_bloque_antiguo = reserva_original_req.data[0]["id_bloque"]
+        servicio_original = (reserva_original_req.data[0].get("bloque_horario") or {}).get("id_servicio")
+        id_estudiante_reserva = (reserva_original_req.data[0].get("proceso_clinico") or {}).get("id_estudiante")
 
-        bloque_nuevo_req = supabase.table("bloque_horario").select("estado").eq("id_bloque", datos.id_bloque_nuevo).execute()
+        bloque_nuevo_req = supabase.table("bloque_horario").select("estado, id_servicio, fecha_hora_inicio").eq("id_bloque", datos.id_bloque_nuevo).execute()
         if not bloque_nuevo_req.data or bloque_nuevo_req.data[0]["estado"] not in ["disponible", "huerfano"]:
             raise HTTPException(status_code=400, detail="El nuevo bloque no es apto.")
+        if servicio_original and bloque_nuevo_req.data[0]["id_servicio"] != servicio_original:
+            raise HTTPException(status_code=400, detail="El nuevo bloque no corresponde al mismo servicio de la reserva original.")
+        if id_estudiante_reserva and _tiene_conflicto_horario(id_estudiante_reserva, bloque_nuevo_req.data[0]["fecha_hora_inicio"], id_reserva_excluir=datos.id_reserva_original):
+            raise HTTPException(status_code=409, detail="El estudiante ya tiene otra hora agendada a esa misma fecha y hora.")
 
         supabase.table("reserva").update({"estado": "cancelado_profesional"}).eq("id_reserva", datos.id_reserva_original).execute()
         bloques_liberados = supabase.table("bloque_horario").update({"estado": "disponible"}).eq("id_bloque", id_bloque_antiguo).execute()
@@ -467,20 +488,23 @@ async def obtener_estudiantes_global(usuario_actual: dict = Depends(obtener_usua
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
         if usuario_actual["rol"] in ["administrativo", "coordinador"]:
-            return supabase.table("estudiante").select("*").order("apellidos").execute().data
+            return fetch_all(lambda: supabase.table("estudiante").select("*").order("apellidos"))
 
+        # Profesional: solo sus pacientes. Se filtra por el profesional del bloque con un
+        # join !inner (evita traer miles de ids de bloques y armar URLs gigantes).
         id_prof = usuario_actual["id_profesional"]
-        bloques_req = supabase.table("bloque_horario").select("id_bloque").eq("id_profesional", id_prof).execute()
-        if not bloques_req.data:
-            return []
-        ids_bloques = [b["id_bloque"] for b in bloques_req.data]
-        reservas_req = supabase.table("reserva").select("proceso_clinico(id_estudiante)").in_("id_bloque", ids_bloques).execute()
-        if not reservas_req.data:
-            return []
-        ids_estudiantes = list(set(r["proceso_clinico"]["id_estudiante"] for r in reservas_req.data if r.get("proceso_clinico")))
+        reservas = fetch_all(lambda: supabase.table("reserva").select(
+            "proceso_clinico(id_estudiante), bloque_horario!inner(id_profesional)"
+        ).eq("bloque_horario.id_profesional", id_prof))
+        ids_estudiantes = list(set(r["proceso_clinico"]["id_estudiante"] for r in reservas if r.get("proceso_clinico")))
         if not ids_estudiantes:
             return []
-        return supabase.table("estudiante").select("*").in_("id_estudiante", ids_estudiantes).order("apellidos").execute().data
+        estudiantes = []
+        for lote in in_chunks(ids_estudiantes):
+            est_req = supabase.table("estudiante").select("*").in_("id_estudiante", lote).execute()
+            estudiantes.extend(est_req.data or [])
+        estudiantes.sort(key=lambda e: (e.get("apellidos") or "", e.get("nombres") or ""))
+        return estudiantes
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -490,11 +514,10 @@ async def obtener_demanda_espera(usuario_actual: dict = Depends(obtener_usuario_
     if usuario_actual["rol"] not in ROLES_ADMIN:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        req = supabase.table("lista_espera").select(
+        return fetch_all(lambda: supabase.table("lista_espera").select(
             "id_lista, fecha_ingreso, es_prioritario, disponibilidad_indicada, motivo_consulta, campus_indicados, "
             "estudiante(nombres, apellidos, rut, carrera), servicio(id_servicio, nombre)"
-        ).eq("estado_oferta", "esperando").execute()
-        return req.data
+        ).eq("estado_oferta", "esperando"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -504,10 +527,9 @@ async def obtener_calendario_reservas(usuario_actual: dict = Depends(obtener_usu
     if usuario_actual["rol"] not in ROLES_ADMIN:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        req = supabase.table("reserva").select(
+        return fetch_all(lambda: supabase.table("reserva").select(
             "id_reserva, estado, bloque_horario(id_servicio, fecha_hora_inicio, fecha_hora_fin, profesional(nombres, apellidos), servicio(nombre), ubicacion(id_ubicacion, nombre)), proceso_clinico(estudiante(nombres, apellidos, rut))"
-        ).in_("estado", ["pendiente", "presente"]).execute()
-        return req.data
+        ).in_("estado", ["pendiente", "presente"]))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -522,25 +544,26 @@ async def obtener_sesiones_sin_registrar(usuario_actual: dict = Depends(obtener_
         ahora_str = ahora_chile().isoformat()
         # Reservas pendientes (conjunto acotado) con bloque embebido; la fecha se filtra en
         # Python para evitar un .in_() sobre todos los bloques pasados (URL demasiado larga).
-        reservas_req = supabase.table("reserva").select(
-            "id_reserva, bloque_horario(fecha_hora_inicio, id_servicio, servicio(nombre), id_profesional, profesional(nombres, apellidos)), "
+        reservas_rows = fetch_all(lambda: supabase.table("reserva").select(
+            "id_reserva, bloque_horario!inner(fecha_hora_inicio, id_servicio, servicio(nombre), id_profesional, profesional(nombres, apellidos)), "
             "proceso_clinico(estudiante(nombres, apellidos, rut))"
-        ).eq("estado", "pendiente").execute()
+        ).eq("estado", "pendiente").lte("bloque_horario.fecha_hora_inicio", ahora_str))
 
-        # Quedarse solo con las citas cuyo bloque ya pasó.
+        # Quedarse solo con las citas cuyo bloque ya pasó (doble filtro por robustez).
         pasadas = []
-        for r in reservas_req.data or []:
+        for r in reservas_rows:
             b = r.get("bloque_horario") or {}
             fh = b.get("fecha_hora_inicio")
             if fh and fh <= ahora_str:
                 pasadas.append(r)
 
-        # Excluir de forma robusta las reservas que ya tienen evolución (consulta explícita).
+        # Excluir de forma robusta las reservas que ya tienen evolución (consulta explícita,
+        # en trozos para no generar URLs gigantes con miles de ids).
         ids_reservas = [r["id_reserva"] for r in pasadas]
         reservas_con_evolucion = set()
-        if ids_reservas:
-            evol_req = supabase.table("evolucion_clinica").select("id_reserva").in_("id_reserva", ids_reservas).execute()
-            reservas_con_evolucion = {e["id_reserva"] for e in (evol_req.data or [])}
+        for lote in in_chunks(ids_reservas):
+            evol_req = supabase.table("evolucion_clinica").select("id_reserva").in_("id_reserva", lote).execute()
+            reservas_con_evolucion.update(e["id_reserva"] for e in (evol_req.data or []))
 
         sesiones = []
         for r in pasadas:
@@ -576,14 +599,14 @@ async def obtener_reservas_estudiante_admin(id_estudiante: str, usuario_actual: 
     try:
         if usuario_actual["rol"] == "profesional":
             id_prof = usuario_actual["id_profesional"]
-            bloques_req = supabase.table("bloque_horario").select("id_bloque").eq("id_profesional", id_prof).execute()
-            if not bloques_req.data:
-                raise HTTPException(status_code=403, detail="No tienes pacientes asignados.")
-            ids_bloques = [b["id_bloque"] for b in bloques_req.data]
             procesos_val_req = supabase.table("proceso_clinico").select("id_proceso").eq("id_estudiante", id_estudiante).execute()
             if not procesos_val_req.data:
                 raise HTTPException(status_code=403, detail="El estudiante no tiene historial clínico.")
-            relacion_req = supabase.table("reserva").select("id_reserva").in_("id_proceso", [p["id_proceso"] for p in procesos_val_req.data]).in_("id_bloque", ids_bloques).execute()
+            relacion_req = supabase.table("reserva").select(
+                "id_reserva, bloque_horario!inner(id_profesional)"
+            ).in_("id_proceso", [p["id_proceso"] for p in procesos_val_req.data]).eq(
+                "bloque_horario.id_profesional", id_prof
+            ).limit(1).execute()
             if not relacion_req.data:
                 raise HTTPException(status_code=403, detail="Solo puedes ver tus propios pacientes.")
 
@@ -727,6 +750,8 @@ async def agendar_hora_admin(datos: SolicitudAgendarHoraAdmin, usuario_actual: d
             bloque_req = supabase.table("bloque_horario").select("estado, fecha_hora_inicio, id_ubicacion").eq("id_bloque", datos.id_bloque).execute()
             if not bloque_req.data or bloque_req.data[0]["estado"] != "disponible":
                 raise HTTPException(status_code=400, detail="El bloque ya no está disponible.")
+            if _tiene_conflicto_horario(datos.id_estudiante, bloque_req.data[0]["fecha_hora_inicio"]):
+                raise HTTPException(status_code=409, detail="El estudiante ya tiene otra hora agendada a esa misma fecha y hora.")
             candidatos_q = supabase.table("bloque_horario").select("id_bloque, id_profesional").eq("id_servicio", datos.id_servicio).eq("fecha_hora_inicio", bloque_req.data[0]["fecha_hora_inicio"]).eq("estado", "disponible")
             id_ubicacion_bloque = bloque_req.data[0].get("id_ubicacion")
             candidatos_q = candidatos_q.eq("id_ubicacion", id_ubicacion_bloque) if id_ubicacion_bloque else candidatos_q.is_("id_ubicacion", "null")

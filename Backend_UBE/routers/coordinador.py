@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query
-from database import supabase, supabase_admin
+from database import supabase, supabase_admin, fetch_all
 from dependencies import obtener_usuario_actual
 from schemas import (SolicitudCrearBloque, SolicitudActualizarBloque, SolicitudCrearUsuario,
                      SolicitudCrearServicio, SolicitudActualizarServicio, SolicitudActualizarProfesional,
@@ -106,8 +106,11 @@ async def crear_bloque(datos: SolicitudCrearBloque, usuario_actual: dict = Depen
             raise HTTPException(status_code=400, detail="Todos los horarios seleccionados están en el pasado.")
 
         min_fecha = min(datetime.fromisoformat(b["fecha_hora_inicio"]) for b in nuevos_bloques)
-        existentes_req = supabase.table("bloque_horario").select("fecha_hora_inicio, fecha_hora_fin").eq("id_profesional", datos.id_profesional).gte("fecha_hora_fin", min_fecha.isoformat()).execute()
-        bloques_existentes = [(datetime.fromisoformat(b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")), datetime.fromisoformat(b["fecha_hora_fin"].replace("Z", "").replace(" ", "T"))) for b in (existentes_req.data or [])]
+        # Paginado: con servicios sub-horarios un profesional supera fácil las 1000 filas
+        # (tope de PostgREST); si se truncara, el chequeo de tope de horario dejaría
+        # pasar bloques duplicados.
+        existentes = fetch_all(lambda: supabase.table("bloque_horario").select("fecha_hora_inicio, fecha_hora_fin").eq("id_profesional", datos.id_profesional).gte("fecha_hora_fin", min_fecha.isoformat()))
+        bloques_existentes = [(datetime.fromisoformat(b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")), datetime.fromisoformat(b["fecha_hora_fin"].replace("Z", "").replace(" ", "T"))) for b in existentes]
 
         bloques_a_insertar = []
         for nb in nuevos_bloques:
@@ -424,11 +427,10 @@ async def eliminar_profesional(id_usuario: str, usuario_actual: dict = Depends(o
 async def obtener_bloques_profesional(id_profesional: str, usuario_actual: dict = Depends(obtener_usuario_actual)):
     _check_coordinador(usuario_actual)
     try:
-        req = supabase.table("bloque_horario").select(
+        return fetch_all(lambda: supabase.table("bloque_horario").select(
             "id_bloque, fecha_hora_inicio, fecha_hora_fin, estado, id_servicio, servicio(nombre), ubicacion(id_ubicacion, nombre, abreviatura), "
             "reserva(estado, evolucion_clinica(id_evolucion), proceso_clinico(estudiante(nombres, apellidos, rut)))"
-        ).eq("id_profesional", id_profesional).order("fecha_hora_inicio", desc=True).execute()
-        return req.data
+        ).eq("id_profesional", id_profesional).order("fecha_hora_inicio", desc=True))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

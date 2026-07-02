@@ -382,6 +382,12 @@ function Dashboard({ session }) {
   };
 
   useEffect(() => {
+    // El catálogo de servicios se necesita en la agenda para detectar servicios
+    // cíclicos (es_ciclico); sin esta carga la lógica cíclica nunca se activaba.
+    cargarServicios();
+  }, []);
+
+  useEffect(() => {
     if (vista === 'reservas') {
       cargarMisReservas();
       setEsperaEditando(null);

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 from datetime import datetime, timedelta
-from database import supabase
+from database import supabase, fetch_all
 from dependencies import obtener_usuario_actual
 from utils_tiempo import ahora_chile
 
@@ -11,6 +11,14 @@ ROLES_REPORTES = ["profesional_apoyo", "coordinador", "administrativo"]
 
 # Un bloque se considera "ocupado" si su estado NO está en esta lista.
 ESTADOS_NO_OCUPADOS = ["disponible", "huerfano", "cancelado"]
+
+
+def _fin_dia(fecha_fin):
+    """Si llega una fecha sin hora ('YYYY-MM-DD'), expandirla al final del día para que
+    el rango sea inclusivo (si no, un lte contra 'YYYY-MM-DDTHH:MM' excluiría todo ese día)."""
+    if fecha_fin and len(fecha_fin) == 10:
+        return fecha_fin + "T23:59:59"
+    return fecha_fin
 
 
 @router.get("/ocupacion")
@@ -24,18 +32,21 @@ async def reporte_ocupacion(
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        query = supabase.table("bloque_horario").select(
-            "id_bloque, estado, id_profesional, id_servicio, profesional(nombres, apellidos), servicio(nombre)"
-        ).gte("fecha_hora_inicio", fecha_inicio).lte("fecha_hora_inicio", fecha_fin)
+        ff = _fin_dia(fecha_fin)
 
-        if id_servicio:
-            query = query.eq("id_servicio", id_servicio)
-        if id_profesional:
-            query = query.eq("id_profesional", id_profesional)
+        def query():
+            q = supabase.table("bloque_horario").select(
+                "id_bloque, estado, id_profesional, id_servicio, profesional(nombres, apellidos), servicio(nombre)"
+            ).gte("fecha_hora_inicio", fecha_inicio).lte("fecha_hora_inicio", ff)
+            if id_servicio:
+                q = q.eq("id_servicio", id_servicio)
+            if id_profesional:
+                q = q.eq("id_profesional", id_profesional)
+            return q
 
-        req = query.execute()
+        filas = fetch_all(query)
         stats = {}
-        for b in req.data:
+        for b in filas:
             prof_name = f"{b['profesional']['nombres']} {b['profesional']['apellidos']}" if b.get("profesional") else "Desconocido"
             serv_name = b["servicio"]["nombre"] if b.get("servicio") else "Desconocido"
             key = f"{b['id_profesional']}_{b['id_servicio']}"
@@ -75,14 +86,14 @@ async def reporte_resumen_global(usuario_actual: dict = Depends(obtener_usuario_
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        activos_req = supabase.table("proceso_clinico").select("id_estudiante").eq("estado", "activo").execute()
-        activos_count = len(set(p["id_estudiante"] for p in activos_req.data)) if activos_req.data else 0
+        activos = fetch_all(lambda: supabase.table("proceso_clinico").select("id_estudiante").eq("estado", "activo"))
+        activos_count = len(set(p["id_estudiante"] for p in activos))
 
-        espera_req = supabase.table("lista_espera").select("id_estudiante").eq("estado_oferta", "esperando").execute()
-        espera_count = len(set(e["id_estudiante"] for e in espera_req.data)) if espera_req.data else 0
+        espera = fetch_all(lambda: supabase.table("lista_espera").select("id_estudiante").eq("estado_oferta", "esperando"))
+        espera_count = len(set(e["id_estudiante"] for e in espera))
 
-        criticos_req = supabase.table("proceso_clinico").select("id_proceso").eq("es_caso_critico", True).execute()
-        criticos_count = len(criticos_req.data) if criticos_req.data else 0
+        criticos = fetch_all(lambda: supabase.table("proceso_clinico").select("id_proceso").eq("es_caso_critico", True))
+        criticos_count = len(criticos)
 
         return {"activos": activos_count, "espera": espera_count, "criticos": criticos_count}
     except Exception as e:
@@ -101,18 +112,21 @@ async def reporte_ocupacion_semanal(
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        query = supabase.table("bloque_horario").select(
-            "id_bloque, estado, fecha_hora_inicio"
-        ).gte("fecha_hora_inicio", fecha_inicio).lte("fecha_hora_inicio", fecha_fin)
+        ff = _fin_dia(fecha_fin)
 
-        if id_servicio:
-            query = query.eq("id_servicio", id_servicio)
-        if id_profesional:
-            query = query.eq("id_profesional", id_profesional)
+        def query():
+            q = supabase.table("bloque_horario").select(
+                "id_bloque, estado, fecha_hora_inicio"
+            ).gte("fecha_hora_inicio", fecha_inicio).lte("fecha_hora_inicio", ff)
+            if id_servicio:
+                q = q.eq("id_servicio", id_servicio)
+            if id_profesional:
+                q = q.eq("id_profesional", id_profesional)
+            return q
 
-        req = query.execute()
+        filas = fetch_all(query)
         semanas = {}
-        for b in req.data:
+        for b in filas:
             fh = b.get("fecha_hora_inicio")
             if not fh:
                 continue
@@ -151,15 +165,20 @@ async def reporte_asistencias(
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        req = supabase.table("reserva").select(
-            "estado, bloque_horario(fecha_hora_inicio, id_servicio, id_profesional)"
-        ).in_("estado", ["presente", "ausente", "atraso"]).execute()
+        ff = _fin_dia(fecha_fin)
+        # Filtro por fecha en el servidor (join !inner) para no traer el historial
+        # completo de reservas; el filtro en Python se mantiene como respaldo.
+        filas = fetch_all(lambda: supabase.table("reserva").select(
+            "estado, bloque_horario!inner(fecha_hora_inicio, id_servicio, id_profesional)"
+        ).in_("estado", ["presente", "ausente", "atraso"]).gte(
+            "bloque_horario.fecha_hora_inicio", fecha_inicio
+        ).lte("bloque_horario.fecha_hora_inicio", ff))
 
         conteo = {"presente": 0, "ausente": 0, "atraso": 0}
-        for r in req.data:
+        for r in filas:
             bh = r.get("bloque_horario") or {}
             fh = bh.get("fecha_hora_inicio")
-            if not fh or fh < fecha_inicio or fh > fecha_fin:
+            if not fh or fh < fecha_inicio or fh > ff:
                 continue
             if id_servicio and bh.get("id_servicio") != id_servicio:
                 continue
@@ -193,16 +212,32 @@ async def reporte_reservas_detalle(
         serv_req = supabase.table("servicio").select("id_servicio, nombre").execute()
         serv_map = {s["id_servicio"]: s["nombre"] for s in (serv_req.data or [])}
 
-        req = supabase.table("reserva").select(
-            "id_reserva, id_proceso, estado, fecha_creacion, "
-            "bloque_horario(fecha_hora_inicio, fecha_hora_fin, id_servicio, id_profesional, "
-                "profesional(nombres, apellidos), servicio(nombre, es_ciclico), ubicacion(nombre)), "
-            "proceso_clinico(motivo_consulta, puntaje_triage, estado, sesiones_realizadas, "
-                "inasistencias_acumuladas, es_caso_critico, fecha_inicio, "
-                "estudiante(nombres, apellidos, rut, carrera, es_caso_critico_activo)), "
-            "evolucion_clinica(id_evolucion, observaciones, diagnostico, plan_tratamiento, "
-                "fecha_atencion, id_servicio_derivacion, id_reserva_derivacion, id_lista_derivacion)"
-        ).execute()
+        ff = _fin_dia(fecha_fin)
+
+        def query():
+            # !inner permite filtrar por columnas del bloque en el servidor; el filtrado
+            # en Python se mantiene como respaldo. fetch_all pagina (tope 1000 filas).
+            q = supabase.table("reserva").select(
+                "id_reserva, id_proceso, estado, fecha_creacion, "
+                "bloque_horario!inner(fecha_hora_inicio, fecha_hora_fin, id_servicio, id_profesional, "
+                    "profesional(nombres, apellidos), servicio(nombre, es_ciclico), ubicacion(nombre)), "
+                "proceso_clinico(motivo_consulta, puntaje_triage, estado, sesiones_realizadas, "
+                    "inasistencias_acumuladas, es_caso_critico, fecha_inicio, "
+                    "estudiante(nombres, apellidos, rut, carrera, es_caso_critico_activo)), "
+                "evolucion_clinica(id_evolucion, observaciones, diagnostico, plan_tratamiento, "
+                    "fecha_atencion, id_servicio_derivacion, id_reserva_derivacion, id_lista_derivacion)"
+            )
+            if fecha_inicio:
+                q = q.gte("bloque_horario.fecha_hora_inicio", fecha_inicio)
+            if ff:
+                q = q.lte("bloque_horario.fecha_hora_inicio", ff)
+            if id_servicio:
+                q = q.eq("bloque_horario.id_servicio", id_servicio)
+            if id_profesional:
+                q = q.eq("bloque_horario.id_profesional", id_profesional)
+            return q
+
+        filas = fetch_all(query)
 
         ahora_iso = ahora_chile().isoformat()
 
@@ -216,14 +251,14 @@ async def reporte_reservas_detalle(
         }
 
         resultados = []
-        for r in (req.data or []):
+        for r in filas:
             bh = r.get("bloque_horario") or {}
             fh = bh.get("fecha_hora_inicio")
 
-            # Filtros (en Python, sobre campos embebidos).
+            # Filtros (en Python, respaldo de los filtros del servidor).
             if fecha_inicio and (not fh or fh < fecha_inicio):
                 continue
-            if fecha_fin and (not fh or fh > fecha_fin):
+            if ff and (not fh or fh > ff):
                 continue
             if id_servicio and bh.get("id_servicio") != id_servicio:
                 continue
@@ -322,21 +357,26 @@ async def reporte_lista_espera_detalle(
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        query = supabase.table("lista_espera").select(
-            "id_lista, id_servicio, fecha_ingreso, es_prioritario, disponibilidad_indicada, "
-            "motivo_consulta, puntaje_triage, estado_oferta, estado_revision, "
-            "estudiante(nombres, apellidos, rut, carrera), servicio(nombre)"
-        )
-        if id_servicio:
-            query = query.eq("id_servicio", id_servicio)
-        req = query.execute()
+        ff = _fin_dia(fecha_fin)
+
+        def query():
+            q = supabase.table("lista_espera").select(
+                "id_lista, id_servicio, fecha_ingreso, es_prioritario, disponibilidad_indicada, "
+                "motivo_consulta, puntaje_triage, estado_oferta, estado_revision, "
+                "estudiante(nombres, apellidos, rut, carrera), servicio(nombre)"
+            )
+            if id_servicio:
+                q = q.eq("id_servicio", id_servicio)
+            return q
+
+        filas = fetch_all(query)
 
         resultados = []
-        for item in (req.data or []):
+        for item in filas:
             fi = item.get("fecha_ingreso")
             if fecha_inicio and (not fi or fi < fecha_inicio):
                 continue
-            if fecha_fin and (not fi or fi > fecha_fin):
+            if ff and (not fi or fi > ff):
                 continue
             est = item.get("estudiante") or {}
             serv = item.get("servicio") or {}
@@ -373,15 +413,17 @@ async def reporte_distribucion_carreras(
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
-        query = supabase.table("proceso_clinico").select(
-            "id_estudiante, estudiante(carrera)"
-        ).eq("estado", "activo")
-        if id_servicio:
-            query = query.eq("id_servicio", id_servicio)
+        def query():
+            q = supabase.table("proceso_clinico").select(
+                "id_estudiante, estudiante(carrera)"
+            ).eq("estado", "activo")
+            if id_servicio:
+                q = q.eq("id_servicio", id_servicio)
+            return q
 
-        req = query.execute()
+        filas = fetch_all(query)
         carreras = {}
-        for p in req.data:
+        for p in filas:
             est = p.get("estudiante") or {}
             carrera = est.get("carrera") or "Sin especificar"
             carreras.setdefault(carrera, set()).add(p["id_estudiante"])
