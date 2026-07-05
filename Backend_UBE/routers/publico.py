@@ -163,6 +163,52 @@ async def obtener_ocupacion_slot(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/slots_ocupados")
+async def obtener_slots_ocupados(id_servicio: str = Query(...)):
+    """Para un servicio, devuelve el conjunto de slots (día de semana + hora exacta)
+    donde HAY al menos un profesional atendiendo con su cupo OCUPADO (bloque
+    'reservado' o 'confirmado'). La grilla de lista de espera los pinta de
+    AMARILLO: son los horarios donde es más probable que se libere un cupo
+    (hay profesionales atendiendo), frente a los GRISES donde no atiende nadie y
+    solo se abriría un cupo si se publican horas nuevas.
+
+    Devuelve una lista de strings "dia|HH:MM" (dia en español, como usa la grilla).
+    Misma ventana de 28 días y lógica de weekday/hora que /ocupacion_slot para no
+    inflar con las repeticiones semanales de una serie cíclica.
+    """
+    try:
+        dias_nombre = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
+        ahora_local = ahora_chile()
+        limite = (ahora_local + timedelta(days=28)).isoformat()
+
+        def query():
+            return (
+                supabase.table("bloque_horario")
+                .select("fecha_hora_inicio")
+                .eq("id_servicio", id_servicio)
+                .in_("estado", ["reservado", "confirmado"])
+                .gt("fecha_hora_inicio", ahora_local.isoformat())
+                .lte("fecha_hora_inicio", limite)
+            )
+
+        # fetch_all evita el tope de 1000 filas de PostgREST.
+        bloques = fetch_all(query)
+
+        slots = set()
+        for b in bloques:
+            fecha = datetime.fromisoformat(
+                b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")
+            )
+            dow = fecha.weekday()
+            if dow > 6:
+                continue
+            slots.add(f"{dias_nombre[dow]}|{fecha.strftime('%H:%M')}")
+
+        return sorted(slots)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/profesionales_activos")
 async def obtener_profesionales_activos(usuario_actual: dict = Depends(obtener_usuario_actual)):
     if usuario_actual["rol"] not in ["profesional_apoyo", "coordinador", "administrativo"]:

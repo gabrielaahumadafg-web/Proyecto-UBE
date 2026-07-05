@@ -26,6 +26,7 @@ export default function AgendarHora({ session }) {
   const [campusSlotTempEspera, setCampusSlotTempEspera] = useState([]);
   const [ubicacionesTodas, setUbicacionesTodas] = useState([]);
   const [ocupacionCampusSlot, setOcupacionCampusSlot] = useState({}); // { id_ubicacion|"__none__": nº profesionales ocupados en el slot abierto }
+  const [slotsConProfesionales, setSlotsConProfesionales] = useState(new Set()); // "dia|HH:MM" donde hay profesionales atendiendo (cupo ocupado → puede liberarse); pinta amarillo vs gris
 
   // Estado para la encuesta de Triage (Solo para Entrevista de Ingreso)
   const [respuestasEncuesta, setRespuestasEncuesta] = useState({ q1: "0", q2: "0", q3: "0" });
@@ -109,6 +110,18 @@ export default function AgendarHora({ session }) {
         .catch(console.error);
     }
   }, [paso]);
+
+  // Al entrar al paso 3, cargar los slots (día+hora) donde HAY profesionales
+  // atendiendo (cupo ocupado): la grilla los pinta de amarillo (más probable que
+  // se libere un cupo) frente a los grises (nadie atiende ahí ahora mismo).
+  useEffect(() => {
+    if (paso === 3 && servicioSeleccionado?.id_servicio) {
+      fetch(`${API_URL}/slots_ocupados?id_servicio=${servicioSeleccionado.id_servicio}`)
+        .then(r => r.ok ? r.json() : [])
+        .then(arr => setSlotsConProfesionales(new Set(Array.isArray(arr) ? arr : [])))
+        .catch(() => setSlotsConProfesionales(new Set()));
+    }
+  }, [paso, servicioSeleccionado]);
 
   const seleccionarServicio = async (servicio) => {
     setServicioSeleccionado(servicio);
@@ -579,7 +592,11 @@ export default function AgendarHora({ session }) {
           
           <h3 className="text-xl font-bold text-blue-900 mb-2">Inscripción a Lista de Espera</h3>
           <p className="text-gray-600 mb-2">Marca en la grilla todas las horas en las que podrías asistir para publicarlas. El sistema te emparejará automáticamente cuando se libere un cupo.</p>
-          <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3 mb-6">Los horarios marcados como <strong>"Hay hora"</strong> (en verde) ya tienen cupo disponible: no puedes anotarlos en la lista de espera, vuelve atrás para reservarlos directamente.</p>
+          <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3 mb-3">Los horarios marcados como <strong>"Hay hora"</strong> (en verde) ya tienen cupo disponible: no puedes anotarlos en la lista de espera, vuelve atrás para reservarlos directamente.</p>
+          <div className="text-sm bg-amber-50 border border-amber-200 rounded p-3 mb-6 space-y-1 text-gray-700">
+            <p><span className="inline-block w-3 h-3 rounded-sm bg-yellow-100 border border-yellow-400 align-middle mr-1"></span><strong>Amarillo:</strong> hay profesionales atendiendo en ese horario — es más probable que se libere un cupo ahí.</p>
+            <p><span className="inline-block w-3 h-3 rounded-sm bg-gray-50 border border-gray-300 align-middle mr-1"></span><strong>Gris:</strong> no hay profesionales atendiendo ahí en este momento. <em>Igual puedes publicarlo</em>: podrían abrirse horas nuevas, pero con menos probabilidad.</p>
+          </div>
 
           {/* Barra de campus por día */}
           {ubicacionesTodas.length > 0 && (
@@ -658,12 +675,18 @@ export default function AgendarHora({ session }) {
                                   </div>
                                 );
                               }
+                              const hayProfesionales = slotsConProfesionales.has(`${dia}|${inicio}`);
                               return (
                                 <div key={inicio} onClick={() => handleSlotClickEspera(dia, inicio, fin)}
+                                  title={seleccionado ? undefined : (hayProfesionales
+                                    ? 'Hay profesionales atendiendo en este horario: es más probable que se libere un cupo aquí.'
+                                    : 'No hay profesionales atendiendo aquí ahora. Igual puedes publicarlo: podrían abrirse horas nuevas, pero con menos probabilidad.')}
                                   className={`h-[40px] flex flex-col justify-center items-center rounded text-[10px] border transition cursor-pointer ${
                                     seleccionado
                                       ? 'bg-blue-600 text-white border-blue-700 shadow-inner'
-                                      : 'hover:bg-blue-50 text-gray-300 border-gray-200 hover:border-blue-300 hover:text-blue-500'
+                                      : hayProfesionales
+                                        ? 'bg-yellow-100 text-yellow-800 border-yellow-300 hover:bg-yellow-200 hover:border-yellow-400'
+                                        : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-500'
                                   }`}
                                 >
                                   <span className="font-bold">{inicio} - {fin}</span>
