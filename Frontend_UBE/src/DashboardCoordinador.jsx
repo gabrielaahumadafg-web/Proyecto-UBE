@@ -690,7 +690,7 @@ export default function DashboardCoordinador({ session }) {
     fechaDia.setDate(fechaBaseGestion.getDate() + diaIndex);
     const fechaStr = `${fechaDia.getFullYear()}-${String(fechaDia.getMonth() + 1).padStart(2, '0')}-${String(fechaDia.getDate()).padStart(2, '0')}`;
     setCrearServicioId(serviciosFiltrados.length === 1 ? serviciosFiltrados[0].id_servicio : '');
-    setCrearHoraInicio(hora); // prellena con la hora en punto de la celda; el coordinador puede afinar el minuto
+    setCrearHoraInicio(''); // la hora la fija el bloque clickeado; el coordinador solo elige el minuto
     setCrearUbicacionId(ubicacionPorDia[diaIndex] || ''); // hereda la ubicación del día (editable)
     setModalCrear({ diaIndex, hora, fechaStr });
   };
@@ -717,6 +717,38 @@ export default function DashboardCoordinador({ session }) {
       return iniDate < bFin && finDate > bIni;
     });
     return { duracion, fin, esPasada, fueraDeRango, haySolape };
+  };
+
+  // Minutos de inicio válidos DENTRO de la hora clickeada (la hora la fija el bloque, ej. 08).
+  // Solo devuelve los minutos cuyo bloque [inicio, inicio+duración] no se solapa con otro bloque
+  // del profesional ese día ni ya pasó. Ej.: si hay algo reservado hasta el min 30, muestra 30 en
+  // adelante (el 30 no se solapa; el 29 sí). Alimenta el <select> de minutos del modal.
+  const getMinutosValidos = () => {
+    if (!modalCrear || !crearServicioId) return [];
+    const duracion = servicios.find(s => s.id_servicio === crearServicioId)?.duracion_minutos || 60;
+    const hh = parseInt(modalCrear.hora.split(':')[0], 10);
+    const ahora = new Date();
+    const bloquesDia = bloquesPublicados
+      .filter(b => b.fecha_hora_inicio && b.estado !== 'cancelado'
+        && b.fecha_hora_inicio.replace(' ', 'T').split('T')[0] === modalCrear.fechaStr)
+      .map(b => {
+        const bIni = new Date(b.fecha_hora_inicio.replace(' ', 'T'));
+        const bFin = b.fecha_hora_fin ? new Date(b.fecha_hora_fin.replace(' ', 'T')) : new Date(bIni.getTime() + 3600000);
+        return { bIni, bFin };
+      });
+    const validos = [];
+    for (let m = 0; m < 60; m++) {
+      const iniDate = new Date(`${modalCrear.fechaStr}T${String(hh).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`);
+      const finDate = new Date(iniDate.getTime() + duracion * 60000);
+      if (iniDate <= ahora) continue; // ya pasó
+      const solapa = bloquesDia.some(({ bIni, bFin }) => iniDate < bFin && finDate > bIni);
+      if (solapa) continue;
+      validos.push({
+        minuto: m,
+        fin: `${String(finDate.getHours()).padStart(2, '0')}:${String(finDate.getMinutes()).padStart(2, '0')}`,
+      });
+    }
+    return validos;
   };
 
   const crearBloqueEnCelda = async () => {
@@ -1940,28 +1972,41 @@ export default function DashboardCoordinador({ session }) {
                   </select>
                 </div>
 
-                {crearServicioId && (
+                {crearServicioId && (() => {
+                  const hhFija = modalCrear.hora.split(':')[0];
+                  const minutosValidos = getMinutosValidos();
+                  const minSel = crearHoraInicio ? crearHoraInicio.split(':')[1] : '';
+                  return (
                   <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Hora de inicio</label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="time"
-                        value={crearHoraInicio}
-                        min="08:00"
-                        max="17:59"
-                        onChange={(e) => setCrearHoraInicio(e.target.value)}
-                        className="p-2 border rounded text-sm w-32"
-                      />
-                      {vc && (
-                        <span className="text-sm text-gray-600">→ termina <strong>{vc.fin}</strong> <span className="text-gray-400">({vc.duracion} min)</span></span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-gray-400 mt-1">Puedes elegir cualquier minuto (ej. 12:10, 12:45). Se repite cada semana hasta fin de año.</p>
-                    {vc?.esPasada && <p className="text-xs text-red-600 mt-1">⚠ Ese horario ya pasó.</p>}
-                    {vc?.haySolape && <p className="text-xs text-red-600 mt-1">⚠ Se solapa con otro bloque del profesional ese día.</p>}
-                    {vc?.fueraDeRango && !vc.esPasada && !vc.haySolape && <p className="text-xs text-amber-600 mt-1">⚠ Fuera del horario de atención habitual (08:00–17:59), pero puedes publicarlo igual.</p>}
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Minuto de inicio</label>
+                    {minutosValidos.length === 0 ? (
+                      <p className="text-xs text-red-600">No quedan minutos libres en la hora {hhFija}:00 (el profesional ya la tiene ocupada). Elige otra hora.</p>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg font-mono font-bold text-gray-800">{hhFija}:</span>
+                          <select
+                            value={minSel}
+                            onChange={(e) => setCrearHoraInicio(e.target.value ? `${hhFija}:${e.target.value}` : '')}
+                            className="p-2 border rounded text-sm w-24"
+                          >
+                            <option value="">-- min --</option>
+                            {minutosValidos.map(mv => (
+                              <option key={mv.minuto} value={String(mv.minuto).padStart(2, '0')}>
+                                {String(mv.minuto).padStart(2, '0')}
+                              </option>
+                            ))}
+                          </select>
+                          {vc && (
+                            <span className="text-sm text-gray-600">→ termina <strong>{vc.fin}</strong> <span className="text-gray-400">({vc.duracion} min)</span></span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-gray-400 mt-1">La hora de inicio es <strong>{hhFija}:00</strong>; elige el minuto exacto. Solo se muestran los minutos que no se solapan con otro bloque del profesional. Se repite cada semana hasta fin de año.</p>
+                      </>
+                    )}
                   </div>
-                )}
+                  );
+                })()}
               </>
             )}
 
