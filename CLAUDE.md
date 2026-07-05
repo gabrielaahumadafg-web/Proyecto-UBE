@@ -97,6 +97,7 @@ Each router guards its own role via `obtener_usuario_actual`. CORS origins come 
 | GET | `/disponibilidad` | public | Available blocks for a service (`?id_servicio=`) |
 | GET | `/profesionales_activos` | prof_apoyo, coordinador, admin | List active professionals |
 | GET | `/ubicaciones` | public | List campus/sedes (`?activo=true` to filter) |
+| GET | `/ocupacion_slot` | public | Count occupied professionals per campus for a `id_servicio`+`dia`(lunes…domingo)+`hora`(HH:MM). Counts **distinct** `id_profesional` whose block is `reservado`/`confirmado` at that weekday+time (28-day window so cyclic series don't inflate the count; weekday+hour filtered in Python; `fetch_all` for the 1000-row cap). Returns `{id_ubicacion|"__none__": nº}`. Powers the per-campus occupancy number in the waitlist campus modal. |
 
 #### `estudiante.py`
 | Method | Path | Auth | Description |
@@ -255,6 +256,7 @@ Blocks can be tagged with a physical campus/sede. `bloque_horario.id_ubicacion` 
 - **Coordinator** manages an `ubicacion` catalog (CRUD mirrors services) and assigns a campus per block when publishing availability.
 - **Booking is campus-aware end-to-end:** `/reservar`, `/admin/agendar_hora` and professional derivation filter their `candidatos_req` by the chosen block's `id_ubicacion` (so `_seleccionar_mejor_bloque` load-balancing never moves the student to a different campus at the same time). Waitlist matching in `asignacion.py` skips blocks whose campus isn't in the student's `campus_indicados`.
 - **Student booking (`AgendarHora.jsx`):** after picking a service, a "¿Qué campus te sirven?" multi-select chip filter (shown only when >1 campus has availability) narrows the grid. **The grid cell shows only "Disponible"** (not a campus name) — a single time slot may have blocks in several campus. Clicking a cell calls `abrirSeleccionSlot`, which groups that slot's blocks by campus (one representative each); if one campus it preselects it, if several the Paso 4 confirmation screen shows a "Selecciona el campus" picker and gates "Confirmar Cita" until one is chosen. (Bug history: the cell used `.find()` and silently reserved only the first campus, hiding the others — now it uses `.filter()`.)
+- **Waitlist campus modal occupancy count (`AgendarHora.jsx`):** when the "¿Qué campus te sirven?" modal opens for a slot (paso 3), a `useEffect` calls `GET /ocupacion_slot` and each campus chip shows the number of **occupied professionals** at that day/time/campus (e.g. "Casa Central (2)", "Online (0)", defaulting to `(0)` via `ocupacionCampusSlot[id] || 0`) — signalling where a cupo is likelier to free up. The chips only render real `ubicacionesTodas`; the `"__none__"` (Sin ubicación) key the endpoint may return isn't shown as a chip here.
 
 ### Frontend calendar utilities (`src/utils/calendarUtils.js`)
 - `getLunes(d)` — returns Monday of the current working week; on Saturday/Sunday it returns the **next** Monday (grids are Mon–Fri, so the ending week is useless).
