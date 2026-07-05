@@ -101,6 +101,68 @@ async def obtener_disponibilidad(id_servicio: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/ocupacion_slot")
+async def obtener_ocupacion_slot(
+    id_servicio: str = Query(...),
+    dia: str = Query(..., description="Día de la semana: lunes|martes|miercoles|jueves|viernes|sabado|domingo"),
+    hora: str = Query(..., description="Hora exacta de inicio del slot en formato HH:MM"),
+):
+    """Para un servicio en un día de la semana + hora exacta, cuenta cuántos
+    profesionales tienen su cupo OCUPADO (bloque en estado 'reservado' o
+    'confirmado') en cada campus. Sirve para que un estudiante que se inscribe
+    en la lista de espera vea en qué campus hay cupos que podrían liberarse.
+
+    Devuelve un dict { id_ubicacion (o "__none__"): cantidad_profesionales_ocupados }.
+    """
+    try:
+        dias_map = {
+            "lunes": 0, "martes": 1, "miercoles": 2, "jueves": 3,
+            "viernes": 4, "sabado": 5, "domingo": 6,
+        }
+        dow = dias_map.get(dia.strip().lower())
+        if dow is None:
+            raise HTTPException(status_code=400, detail="Día de la semana inválido.")
+
+        ahora_local = ahora_chile()
+        # Ventana acotada: para servicios cíclicos la serie semanal genera decenas de
+        # bloques al año; con ~4 semanas basta para captar a cada profesional al menos
+        # una vez en ese día/hora. Contamos profesionales DISTINTOS (no bloques) para
+        # no inflar el número con las repeticiones semanales de la misma serie.
+        limite = (ahora_local + timedelta(days=28)).isoformat()
+
+        def query():
+            return (
+                supabase.table("bloque_horario")
+                .select("id_profesional, fecha_hora_inicio, ubicacion(id_ubicacion)")
+                .eq("id_servicio", id_servicio)
+                .in_("estado", ["reservado", "confirmado"])
+                .gt("fecha_hora_inicio", ahora_local.isoformat())
+                .lte("fecha_hora_inicio", limite)
+            )
+
+        # fetch_all evita el tope de 1000 filas de PostgREST.
+        bloques = fetch_all(query)
+
+        # id_ubicacion -> set(id_profesional) ocupados en ese día/hora exactos.
+        ocupados: dict = {}
+        for b in bloques:
+            fecha = datetime.fromisoformat(
+                b["fecha_hora_inicio"].replace("Z", "").replace(" ", "T")
+            )
+            if fecha.weekday() != dow:
+                continue
+            if fecha.strftime("%H:%M") != hora:
+                continue
+            id_ubi = (b.get("ubicacion") or {}).get("id_ubicacion") or "__none__"
+            ocupados.setdefault(id_ubi, set()).add(b.get("id_profesional"))
+
+        return {id_ubi: len(profs) for id_ubi, profs in ocupados.items()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/profesionales_activos")
 async def obtener_profesionales_activos(usuario_actual: dict = Depends(obtener_usuario_actual)):
     if usuario_actual["rol"] not in ["profesional_apoyo", "coordinador", "administrativo"]:

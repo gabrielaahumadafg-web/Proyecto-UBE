@@ -25,6 +25,7 @@ export default function AgendarHora({ session }) {
   const [slotModalEspera, setSlotModalEspera] = useState(null);       // { dia, inicio, fin } | null
   const [campusSlotTempEspera, setCampusSlotTempEspera] = useState([]);
   const [ubicacionesTodas, setUbicacionesTodas] = useState([]);
+  const [ocupacionCampusSlot, setOcupacionCampusSlot] = useState({}); // { id_ubicacion|"__none__": nº profesionales ocupados en el slot abierto }
 
   // Estado para la encuesta de Triage (Solo para Entrevista de Ingreso)
   const [respuestasEncuesta, setRespuestasEncuesta] = useState({ q1: "0", q2: "0", q3: "0" });
@@ -185,6 +186,22 @@ export default function AgendarHora({ session }) {
     setBloqueSeleccionado(opciones.length === 1 ? opciones[0].bloque : null);
     setPaso(4);
   };
+
+  // Al abrir el modal de campus (lista de espera), consulta cuántos profesionales
+  // están ocupados por campus en ese día/hora exactos, para orientar al beneficiario
+  // sobre dónde es más probable que se libere un cupo.
+  useEffect(() => {
+    if (!slotModalEspera || !servicioSeleccionado?.id_servicio) {
+      setOcupacionCampusSlot({});
+      return;
+    }
+    const { dia, inicio } = slotModalEspera;
+    const params = new URLSearchParams({ id_servicio: servicioSeleccionado.id_servicio, dia, hora: inicio });
+    fetch(`${API_URL}/ocupacion_slot?${params.toString()}`)
+      .then(res => res.ok ? res.json() : {})
+      .then(data => setOcupacionCampusSlot(data && typeof data === 'object' ? data : {}))
+      .catch(() => setOcupacionCampusSlot({}));
+  }, [slotModalEspera, servicioSeleccionado]);
 
   const handleSlotClickEspera = (dia, inicio, fin) => {
     const yaSeleccionado = (disponibilidad[dia] || []).includes(inicio);
@@ -782,12 +799,14 @@ export default function AgendarHora({ session }) {
             <div className="flex flex-wrap gap-2 mb-3">
               {ubicacionesTodas.map(u => {
                 const activo = campusSlotTempEspera.includes(u.id_ubicacion);
+                const ocupados = ocupacionCampusSlot[u.id_ubicacion] || 0;
                 return (
                   <button key={u.id_ubicacion} type="button"
                     onClick={() => setCampusSlotTempEspera(prev => activo ? prev.filter(id => id !== u.id_ubicacion) : [...prev, u.id_ubicacion])}
                     className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition ${activo ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'}`}
+                    title={`${ocupados} profesional(es) ocupado(s) en este horario y campus`}
                   >
-                    {u.nombre}
+                    {u.nombre} ({ocupados})
                   </button>
                 );
               })}
