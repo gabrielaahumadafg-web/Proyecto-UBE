@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { API_URL } from './config';
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad } from './utils/calendarUtils';
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils';
 
 export default function AgendarHora({ session }) {
   const [paso, setPaso] = useState(1);
@@ -538,12 +538,11 @@ export default function AgendarHora({ session }) {
                             return (
                               <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                 <div className="flex flex-col gap-1">
-                                  {subSlots.map(({ inicio, fin }) => {
-                                    const bloquesEnSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
-                                    return bloquesEnSlot.length > 0 ? (
+                                  {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
+                                    return bloques.length > 0 ? (
                                       <button
                                         key={inicio}
-                                        onClick={() => abrirSeleccionSlot(bloquesEnSlot)}
+                                        onClick={() => abrirSeleccionSlot(bloques)}
                                         className="h-[40px] flex flex-col justify-center items-center bg-green-100 hover:bg-green-200 border border-green-500 text-green-900 rounded text-[10px] text-center shadow-sm transition cursor-pointer"
                                       >
                                         <span className="font-bold">{inicio} - {fin}</span>

@@ -262,23 +262,28 @@ Blocks can be tagged with a physical campus/sede. `bloque_horario.id_ubicacion` 
 - `getLunes(d)` — returns Monday of the current working week; on Saturday/Sunday it returns the **next** Monday (grids are Mon–Fri, so the ending week is useless).
 - `getBlocksForCell(blocks, fechaBase, diaIndex, hora)` — filters blocks for a grid cell by matching date and **hour prefix only** (`split(':')[0]`), so all sub-hourly blocks within an hour appear in the same row.
 - `deduplicateCyclicBlocks(blocks, isCyclic)` — for cyclic services, collapses the weekly series to show only the first occurrence per (day, time, professional) combination.
+- `mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin)` — merges the hour's **theoretical** sub-slots (aligned to `:00`, step = service duration) with the **real** blocks of a cell, so blocks that start at **any minute** (e.g. `12:10`, `12:45`, not only duration multiples) still appear and are bookable. Returns a list sorted by start time; each entry is `{ inicio, fin, bloques }` — an empty `bloques` (theoretical sub-slot with no cupo → grey cell) or the real block(s) at that minute (`fin` taken from the block's own `fecha_hora_fin`). A theoretical minute that coincides with a real block is not duplicated (the real block wins). **Every real-block booking grid uses this** (see below); it's what makes arbitrary-minute publishing usable end-to-end.
+
+### Arbitrary-minute block publishing (Google-Calendar style)
+The coordinator publishes availability at the **exact minute** (not only on the hour). In `DashboardCoordinador.jsx` the "Publicar Hora" modal uses a free `<input type="time">` (`crearHoraInicio`, prefilled with the clicked hour, editable to any minute) instead of fixed sub-slot buttons; `getValidacionCrear()` computes the end time from the fixed service duration and warns on past/overlap/out-of-range (08:00–17:59), blocking publish on past/overlap. The backend `POST /bloques` already accepted arbitrary `fechas_inicio` datetimes and enforces the authoritative per-professional **overlap** check (`nb_ini < ex_fin and nb_fin > ex_ini`), so **no backend change was needed** — one click still generates the weekly series to Dec 31 (skipping holidays). The coordinator management grid positions block chips by minute (`top: minInicio/60`), so it already rendered arbitrary minutes.
 
 ### Sub-hourly service grids
-**Every** booking/availability grid across the app follows the same pattern: 10 hourly rows (08:00–17:00), with sub-slot divs inside each cell computed from the service's `duracion_minutos`. Example for a 20-min service:
+Booking/availability grids use 10 hourly rows (08:00–17:00) with sub-slot divs inside each cell computed from the service's `duracion_minutos`:
 ```js
 const subSlots = [];
 for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
   subSlots.push({ inicio: `${hh}:${mm}`, fin: `...` });
 }
 ```
-Grids using this pattern:
-- Student booking (`AgendarHora.jsx` paso 2 "Selecciona tu hora") and waitlist enrollment (paso 3).
-- Coordinator availability publication grid + priority grid (`DashboardCoordinador.jsx`).
-- Admin booking grid + priority-availability grid (`DashboardAdministrativo.jsx`).
-- Professional derivation grids (`DashboardProfesional.jsx`, calendario + lista modes).
-- **Coordinator/admin "Calendario de Disponibilidad"** sub-view (see *Unified Demanda / Reservas tab* below) — read-only cupos count per sub-slot.
+**Real-block booking grids** (those that display/reserve actual `bloque_horario`) then feed `subSlots` + the cell's blocks through `mergeSlotsConBloques(...)` so arbitrary-minute blocks show up — never re-match blocks with `substring(0,5) === inicio` (that silently drops off-grid minutes). These are:
+- Student booking (`AgendarHora.jsx` paso 2 "Selecciona tu hora").
+- Coordinator booking grid (buscador → agendar) + read-only "Calendario de Disponibilidad" cupos (`DashboardCoordinador.jsx`).
+- Admin booking grid + "cambiar serie" grid (`DashboardAdministrativo.jsx`).
+- Professional derivation grid (`DashboardProfesional.jsx`).
 
-The available `duracion_minutos` is read per-service (`servicio.duracion_minutos`, `servicios.find(...)?.duracion_minutos`, etc.), falling back to `60`. **Critical:** availability grids must store the exact sub-slot start time (e.g. `"08:20"`) in `disponibilidad_indicada`, never the hour-level `"08:00"` — the backend matches by exact `strftime("%H:%M")`, so an hour-level time would never match a sub-hourly block.
+**Waitlist / priority declared-availability grids** (student `AgendarHora.jsx` paso 3, admin priority grid, coordinator priority grid) still render only the aligned `subSlots` — they are for the student to **declare** availability, not to book a specific block. **Known limitation:** because backend waitlist matching is exact `strftime("%H:%M")`, a student who declared an aligned time (e.g. `12:00`) won't be auto-matched to an arbitrary-minute block (e.g. `12:10`) that frees up later; direct booking of that block still works. Reworking those grids to allow arbitrary-minute declarations is a separate, larger change.
+
+The available `duracion_minutos` is read per-service (`servicio.duracion_minutos`, `servicios.find(...)?.duracion_minutos`, etc.), falling back to `60`. **Critical:** declared-availability grids must store the exact sub-slot start time (e.g. `"08:20"`) in `disponibilidad_indicada`, never the hour-level `"08:00"` — the backend matches by exact `strftime("%H:%M")`.
 
 ### Responsive dashboard layout
 The student (`Dashboard.jsx`) and admin (`DashboardAdministrativo.jsx`) dashboards use a mobile-friendly **top navbar + horizontal scrollable tabs** layout (matching `DashboardProfesional.jsx`) — not a fixed-width sidebar (a fixed 250px sidebar breaks on mobile, wrapping text letter-by-letter). Pattern:

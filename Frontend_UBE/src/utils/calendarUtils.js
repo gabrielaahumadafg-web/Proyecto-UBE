@@ -55,6 +55,54 @@ export function getBlocksForCell(blocks, fechaBase, diaIndex, hora) {
 }
 
 /**
+ * Combina los sub-slots "teóricos" de una hora (alineados a la hora, con paso =
+ * duración del servicio: p. ej. 09:00, 09:20, 09:40) con los bloques REALES de esa
+ * celda. Soporta bloques que empiezan en CUALQUIER minuto (p. ej. 12:10, 12:45), no
+ * solo en los múltiplos de la duración — necesario desde que el coordinador puede
+ * publicar horarios a la hora exacta (estilo Google Calendar).
+ *
+ * Devuelve una lista ordenada por hora de inicio. Cada entrada es
+ * `{ inicio, fin, bloques }`:
+ *   - sub-slot teórico sin cupos → `bloques` vacío (se pinta como celda gris).
+ *   - bloque(s) real(es) a esa hora → `bloques` con los bloques de ese minuto (uno
+ *     por campus si `getBlocksForCell` ya dedup­licó), y `fin` tomado del propio
+ *     bloque (`fecha_hora_fin`) para reflejar su duración real.
+ * Un minuto teórico que coincide con un bloque real NO se duplica: gana el real.
+ *
+ * @param {Array}  subSlots     - sub-slots teóricos [{inicio, fin}] de la hora
+ * @param {Array}  bloquesCelda - bloques reales de la celda (día+hora)
+ * @param {number} duracionMin  - duración del servicio (fallback para calcular `fin`)
+ * @returns {Array<{inicio:string, fin:string, bloques:Array}>}
+ */
+export function mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin = 60) {
+  const grupos = new Map(); // "HH:MM" -> { inicio, fin, bloques: [] }
+  (Array.isArray(bloquesCelda) ? bloquesCelda : []).forEach(b => {
+    if (!b?.fecha_hora_inicio) return;
+    const inicio = b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5);
+    if (!grupos.has(inicio)) {
+      let fin = b.fecha_hora_fin
+        ? b.fecha_hora_fin.replace(' ', 'T').split('T')[1].substring(0, 5)
+        : null;
+      if (!fin) {
+        const [h, m] = inicio.split(':').map(Number);
+        const finMin = h * 60 + m + duracionMin;
+        fin = `${String(Math.floor(finMin / 60)).padStart(2, '0')}:${String(finMin % 60).padStart(2, '0')}`;
+      }
+      grupos.set(inicio, { inicio, fin, bloques: [] });
+    }
+    grupos.get(inicio).bloques.push(b);
+  });
+
+  const entradas = [];
+  (Array.isArray(subSlots) ? subSlots : []).forEach(s => {
+    if (!grupos.has(s.inicio)) entradas.push({ inicio: s.inicio, fin: s.fin, bloques: [] });
+  });
+  grupos.forEach(g => entradas.push(g));
+  entradas.sort((a, b) => a.inicio.localeCompare(b.inicio));
+  return entradas;
+}
+
+/**
  * Construye un Set de claves "dia|HH:MM" (día en minúsculas sin tilde:
  * lunes, martes, miercoles, jueves, viernes) a partir de los bloques con
  * disponibilidad. Sirve para deshabilitar esos slots en las grillas de

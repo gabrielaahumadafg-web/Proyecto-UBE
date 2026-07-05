@@ -3,7 +3,7 @@ import { API_URL } from './config';
 import { supabase } from './supabaseClient'
 import FormularioMotivo, { buildMotivoFinal } from './FormularioMotivo'
 import HistorialEstudiante from './HistorialEstudiante'
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad } from './utils/calendarUtils'
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils'
 
 function DashboardAdministrativo({ session }) {
   const [vista, setVista] = useState('inicio')
@@ -1844,11 +1844,10 @@ function DashboardAdministrativo({ session }) {
                                 return (
                                   <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                     <div className="flex flex-col gap-1">
-                                      {subSlots.map(({ inicio, fin }) => {
+                                      {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
                                         // Un bloque por campus disponible en este horario (getBlocksForCell ya deduplica por hora+campus).
-                                        const bloquesSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
-                                        return bloquesSlot.length > 0 ? (
-                                          bloquesSlot.map(bloque => (
+                                        return bloques.length > 0 ? (
+                                          bloques.map(bloque => (
                                             <button
                                               key={`${inicio}-${bloque.id_bloque}`}
                                               onClick={() => { setBloqueSeleccionado(bloque); setPasoAgendar(tipoAgendamiento === 'prioritario' ? 3 : 4); }}
@@ -2067,11 +2066,10 @@ function DashboardAdministrativo({ session }) {
                                   return (
                                     <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                       <div className="flex flex-col gap-1">
-                                        {subSlots.map(({ inicio, fin }) => {
+                                        {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
                                           // Un bloque por campus disponible en este horario (getBlocksForCell ya deduplica por hora+campus).
-                                          const bloquesSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
-                                          return bloquesSlot.length > 0 ? (
-                                            bloquesSlot.map(bloque => (
+                                          return bloques.length > 0 ? (
+                                            bloques.map(bloque => (
                                               <button
                                                 key={`${inicio}-${bloque.id_bloque}`}
                                                 onClick={() => { setBloqueCambioSeleccionado(bloque); setPasoCambioSerie(2); }}

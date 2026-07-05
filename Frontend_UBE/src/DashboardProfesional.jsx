@@ -3,7 +3,7 @@ import { API_URL } from './config';
 import { supabase } from './supabaseClient';
 import FormularioMotivo, { buildMotivoFinal } from './FormularioMotivo';
 import HistorialEstudiante from './HistorialEstudiante';
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad } from './utils/calendarUtils';
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils';
 
 export default function DashboardProfesional({ session }) {
   const [pestañaActiva, setPestañaActiva] = useState('agenda');
@@ -790,14 +790,13 @@ export default function DashboardProfesional({ session }) {
                                                     return (
                                                       <td key={i} className="border border-gray-300 p-1 align-top bg-white">
                                                         <div className="flex flex-col gap-1">
-                                                          {subSlots.map(({ inicio, fin }) => {
-                                                            const bloquesSlot = celdas.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
-                                                            const estaElegido = bloqueDerivacionSeleccionado && bloquesSlot.some(b => b.id_bloque === bloqueDerivacionSeleccionado.id_bloque);
-                                                            return bloquesSlot.length > 0 ? (
+                                                          {mergeSlotsConBloques(subSlots, celdas, duracionDerivacion).map(({ inicio, fin, bloques }) => {
+                                                            const estaElegido = bloqueDerivacionSeleccionado && bloques.some(b => b.id_bloque === bloqueDerivacionSeleccionado.id_bloque);
+                                                            return bloques.length > 0 ? (
                                                               <button
                                                                 key={inicio}
                                                                 type="button"
-                                                                onClick={() => abrirSeleccionSlotDeriv(bloquesSlot)}
+                                                                onClick={() => abrirSeleccionSlotDeriv(bloques)}
                                                                 className={`h-[40px] flex flex-col justify-center items-center rounded text-[10px] border transition cursor-pointer ${estaElegido ? 'bg-green-600 text-white border-green-700 shadow-inner' : 'bg-green-100 hover:bg-green-200 border-green-500 text-green-900'}`}
                                                               >
                                                                 <span className="font-bold">{inicio} - {fin}</span>
