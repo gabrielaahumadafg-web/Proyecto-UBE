@@ -3,7 +3,7 @@ import { API_URL } from './config';
 import { supabase } from './supabaseClient'
 import FormularioMotivo, { buildMotivoFinal } from './FormularioMotivo'
 import HistorialEstudiante from './HistorialEstudiante'
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils'
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, getSubSlots } from './utils/calendarUtils'
 
 function DashboardAdministrativo({ session }) {
   const [vista, setVista] = useState('inicio')
@@ -1228,17 +1228,7 @@ function DashboardAdministrativo({ session }) {
                       <tbody>
                         {horasOpciones.map(hora => {
                           const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroDemanda)?.duracion_minutos || 60;
-                          const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                          const subSlots = [];
-                          for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                            const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                            const mm = String(m % 60).padStart(2, '0');
-                            const endMin = m + duracionMin;
-                            subSlots.push({
-                              inicio: `${hh}:${mm}`,
-                              fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                            });
-                          }
+                          const subSlots = getSubSlots(hora, duracionMin);
                           return (
                             <tr key={hora}>
                               <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1333,17 +1323,7 @@ function DashboardAdministrativo({ session }) {
                       <tbody>
                         {horasOpciones.map(hora => {
                           const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroDisp)?.duracion_minutos || 60;
-                          const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                          const subSlots = [];
-                          for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                            const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                            const mm = String(m % 60).padStart(2, '0');
-                            const endMin = m + duracionMin;
-                            subSlots.push({
-                              inicio: `${hh}:${mm}`,
-                              fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                            });
-                          }
+                          const subSlots = getSubSlots(hora, duracionMin);
                           return (
                           <tr key={hora}>
                             <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1440,17 +1420,7 @@ function DashboardAdministrativo({ session }) {
                       <tbody>
                         {horasOpciones.map(hora => {
                           const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroCalendario)?.duracion_minutos || 60;
-                          const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                          const subSlots = [];
-                          for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                            const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                            const mm = String(m % 60).padStart(2, '0');
-                            const endMin = m + duracionMin;
-                            subSlots.push({
-                              inicio: `${hh}:${mm}`,
-                              fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                            });
-                          }
+                          const subSlots = getSubSlots(hora, duracionMin);
                           return (
                             <tr key={hora}>
                               <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1823,17 +1793,7 @@ function DashboardAdministrativo({ session }) {
                         <tbody>
                           {horasOpciones.map(hora => {
                             const duracionMin = servicioSeleccionado?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({
-                                inicio: `${hh}:${mm}`,
-                                fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                              });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                             <tr key={hora}>
                               <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 align-top w-20 text-xs">
@@ -1844,10 +1804,11 @@ function DashboardAdministrativo({ session }) {
                                 return (
                                   <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                     <div className="flex flex-col gap-1">
-                                      {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
+                                      {subSlots.map(({ inicio, fin }) => {
                                         // Un bloque por campus disponible en este horario (getBlocksForCell ya deduplica por hora+campus).
-                                        return bloques.length > 0 ? (
-                                          bloques.map(bloque => (
+                                        const bloquesSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
+                                        return bloquesSlot.length > 0 ? (
+                                          bloquesSlot.map(bloque => (
                                             <button
                                               key={`${inicio}-${bloque.id_bloque}`}
                                               onClick={() => { setBloqueSeleccionado(bloque); setPasoAgendar(tipoAgendamiento === 'prioritario' ? 3 : 4); }}
@@ -1899,14 +1860,7 @@ function DashboardAdministrativo({ session }) {
                     <tbody>
                       {horasOpciones.map(hora => {
                         const duracionMin = servicioSeleccionado?.duracion_minutos || 60;
-                        const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                        const subSlots = [];
-                        for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                          const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                          const mm = String(m % 60).padStart(2, '0');
-                          const endMin = m + duracionMin;
-                          subSlots.push({ inicio: `${hh}:${mm}`, fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}` });
-                        }
+                        const subSlots = getSubSlots(hora, duracionMin);
                         return (
                         <tr key={hora}>
                           <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 text-xs">
@@ -2048,14 +2002,7 @@ function DashboardAdministrativo({ session }) {
                         <tbody>
                           {horasOpciones.map(hora => {
                             const duracionMin = servicioCambiar?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({ inicio: `${hh}:${mm}`, fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}` });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                               <tr key={hora}>
                                 <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 align-top w-20 text-xs">
@@ -2066,10 +2013,11 @@ function DashboardAdministrativo({ session }) {
                                   return (
                                     <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                       <div className="flex flex-col gap-1">
-                                        {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
+                                        {subSlots.map(({ inicio, fin }) => {
                                           // Un bloque por campus disponible en este horario (getBlocksForCell ya deduplica por hora+campus).
-                                          return bloques.length > 0 ? (
-                                            bloques.map(bloque => (
+                                          const bloquesSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
+                                          return bloquesSlot.length > 0 ? (
+                                            bloquesSlot.map(bloque => (
                                               <button
                                                 key={`${inicio}-${bloque.id_bloque}`}
                                                 onClick={() => { setBloqueCambioSeleccionado(bloque); setPasoCambioSerie(2); }}
@@ -2168,14 +2116,7 @@ function DashboardAdministrativo({ session }) {
                     <tbody>
                       {horasOpciones.map(hora => {
                         const duracionMin = servicioCambiar?.duracion_minutos || 60;
-                        const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                        const subSlots = [];
-                        for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                          const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                          const mm = String(m % 60).padStart(2, '0');
-                          const endMin = m + duracionMin;
-                          subSlots.push({ inicio: `${hh}:${mm}`, fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}` });
-                        }
+                        const subSlots = getSubSlots(hora, duracionMin);
                         return (
                         <tr key={hora}>
                           <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 text-xs">

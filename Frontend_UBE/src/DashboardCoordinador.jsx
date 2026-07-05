@@ -3,7 +3,7 @@ import { API_URL } from './config';
 import { supabase } from './supabaseClient';
 import FormularioMotivo, { buildMotivoFinal } from './FormularioMotivo';
 import HistorialEstudiante from './HistorialEstudiante';
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils';
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, getSubSlots } from './utils/calendarUtils';
 
 export default function DashboardCoordinador({ session }) {
   const [pestañaActiva, setPestañaActiva] = useState('registro');
@@ -690,65 +690,25 @@ export default function DashboardCoordinador({ session }) {
     fechaDia.setDate(fechaBaseGestion.getDate() + diaIndex);
     const fechaStr = `${fechaDia.getFullYear()}-${String(fechaDia.getMonth() + 1).padStart(2, '0')}-${String(fechaDia.getDate()).padStart(2, '0')}`;
     setCrearServicioId(serviciosFiltrados.length === 1 ? serviciosFiltrados[0].id_servicio : '');
-    setCrearHoraInicio(''); // la hora la fija el bloque clickeado; el coordinador solo elige el minuto
+    setCrearHoraInicio('');
     setCrearUbicacionId(ubicacionPorDia[diaIndex] || ''); // hereda la ubicación del día (editable)
     setModalCrear({ diaIndex, hora, fechaStr });
   };
 
-  // Valida la hora libre elegida (estilo Google Calendar): calcula la hora de término
-  // según la duración fija del servicio y detecta si ya pasó, si queda fuera del horario
-  // de atención (08:00–17:59) o si se solapa con otro bloque del profesional ese día.
-  // El backend hace la validación autoritativa; esto es solo feedback inmediato.
-  const getValidacionCrear = () => {
-    if (!modalCrear || !crearServicioId || !crearHoraInicio || !/^\d{2}:\d{2}$/.test(crearHoraInicio)) return null;
-    const duracion = servicios.find(s => s.id_servicio === crearServicioId)?.duracion_minutos || 60;
-    const iniDate = new Date(`${modalCrear.fechaStr}T${crearHoraInicio}:00`);
-    if (isNaN(iniDate.getTime())) return null;
-    const finDate = new Date(iniDate.getTime() + duracion * 60000);
-    const fin = `${String(finDate.getHours()).padStart(2, '0')}:${String(finDate.getMinutes()).padStart(2, '0')}`;
-    const esPasada = iniDate <= new Date();
-    const [hIni] = crearHoraInicio.split(':').map(Number);
-    const fueraDeRango = hIni < 8 || hIni > 17;
-    // Solape con otro bloque del profesional ese mismo día (la serie se repite igual cada semana).
-    const haySolape = bloquesPublicados.some(b => {
-      if (!b.fecha_hora_inicio || b.estado === 'cancelado') return false;
-      const bIni = new Date(b.fecha_hora_inicio.replace(' ', 'T'));
-      const bFin = b.fecha_hora_fin ? new Date(b.fecha_hora_fin.replace(' ', 'T')) : new Date(bIni.getTime() + 3600000);
-      return iniDate < bFin && finDate > bIni;
-    });
-    return { duracion, fin, esPasada, fueraDeRango, haySolape };
-  };
-
-  // Minutos de inicio válidos DENTRO de la hora clickeada (la hora la fija el bloque, ej. 08).
-  // Solo devuelve los minutos cuyo bloque [inicio, inicio+duración] no se solapa con otro bloque
-  // del profesional ese día ni ya pasó. Ej.: si hay algo reservado hasta el min 30, muestra 30 en
-  // adelante (el 30 no se solapa; el 29 sí). Alimenta el <select> de minutos del modal.
-  const getMinutosValidos = () => {
+  // Sub-slots disponibles dentro de la hora elegida, según la duración del servicio.
+  const getSubSlotsCrear = () => {
     if (!modalCrear || !crearServicioId) return [];
     const duracion = servicios.find(s => s.id_servicio === crearServicioId)?.duracion_minutos || 60;
-    const hh = parseInt(modalCrear.hora.split(':')[0], 10);
-    const ahora = new Date();
-    const bloquesDia = bloquesPublicados
-      .filter(b => b.fecha_hora_inicio && b.estado !== 'cancelado'
-        && b.fecha_hora_inicio.replace(' ', 'T').split('T')[0] === modalCrear.fechaStr)
-      .map(b => {
-        const bIni = new Date(b.fecha_hora_inicio.replace(' ', 'T'));
-        const bFin = b.fecha_hora_fin ? new Date(b.fecha_hora_fin.replace(' ', 'T')) : new Date(bIni.getTime() + 3600000);
-        return { bIni, bFin };
-      });
-    const validos = [];
-    for (let m = 0; m < 60; m++) {
-      const iniDate = new Date(`${modalCrear.fechaStr}T${String(hh).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`);
-      const finDate = new Date(iniDate.getTime() + duracion * 60000);
-      if (iniDate <= ahora) continue; // ya pasó
-      const solapa = bloquesDia.some(({ bIni, bFin }) => iniDate < bFin && finDate > bIni);
-      if (solapa) continue;
-      validos.push({
-        minuto: m,
-        fin: `${String(finDate.getHours()).padStart(2, '0')}:${String(finDate.getMinutes()).padStart(2, '0')}`,
-      });
-    }
-    return validos;
+    const ocupados = getBloquesPublicadosEnGrilla(modalCrear.diaIndex, modalCrear.hora)
+      .map(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5));
+    // Mismos sub-slots encadenados desde las 08:00 que ofrecen las grillas de reserva,
+    // para que lo que publica el coordinador coincida exactamente con lo reservable.
+    return getSubSlots(modalCrear.hora, duracion).map(({ inicio, fin }) => ({
+      inicio,
+      fin,
+      ocupado: ocupados.includes(inicio),
+      esPasada: new Date(`${modalCrear.fechaStr}T${inicio}:00`) <= new Date(),
+    }));
   };
 
   const crearBloqueEnCelda = async () => {
@@ -1390,17 +1350,7 @@ export default function DashboardCoordinador({ session }) {
                         <tbody>
                           {horasOpcionesAgendamiento.map(hora => {
                             const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroDemanda)?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({
-                                inicio: `${hh}:${mm}`,
-                                fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                              });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                               <tr key={hora}>
                                 <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1495,17 +1445,7 @@ export default function DashboardCoordinador({ session }) {
                         <tbody>
                           {horasOpcionesAgendamiento.map(hora => {
                             const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroDisp)?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({
-                                inicio: `${hh}:${mm}`,
-                                fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                              });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                             <tr key={hora}>
                               <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1520,33 +1460,30 @@ export default function DashboardCoordinador({ session }) {
                                 return (
                                   <td key={`${dia}-${hora}`} className="border-2 border-gray-300 p-1 align-top bg-white">
                                     <div className="flex flex-col gap-1">
-                                      {(() => {
-                                        const prefijoHora = hora.split(':')[0];
-                                        const bloquesCeldaDisp = bloquesDisp.filter(b => {
+                                      {subSlots.map(({ inicio, fin }) => {
+                                        const bloquesSlot = bloquesDisp.filter(b => {
                                           if (!b.fecha_hora_inicio) return false;
                                           const [bFechaStr, bHoraStr] = b.fecha_hora_inicio.replace(' ', 'T').split('T');
-                                          if (bFechaStr !== fechaStr || bHoraStr.split(':')[0] !== prefijoHora) return false;
+                                          if (bFechaStr !== fechaStr || bHoraStr.substring(0, 5) !== inicio) return false;
                                           if (ubicacionFiltro && b.ubicacion?.id_ubicacion !== ubicacionFiltro) return false;
                                           return true;
                                         });
-                                        return mergeSlotsConBloques(subSlots, bloquesCeldaDisp, duracionMin).map(({ inicio, fin, bloques }) => {
-                                          const count = bloques.length;
-                                          return count > 0 ? (
-                                            <button
-                                              key={inicio}
-                                              onClick={() => setCeldaSeleccionadaDisp({ dia, hora: inicio, fecha: fechaStr, bloques })}
-                                              className="min-h-[40px] flex flex-col justify-center items-center bg-green-100 hover:bg-green-200 border border-green-500 text-green-900 rounded text-[10px] text-center shadow-sm cursor-pointer"
-                                            >
-                                              <span className="font-bold">{inicio} - {fin}</span>
-                                              <span className="font-semibold">{count} {count === 1 ? 'cupo' : 'cupos'}</span>
-                                            </button>
-                                          ) : (
-                                            <div key={inicio} className="min-h-[40px] flex flex-col justify-center items-center rounded text-[10px] border border-gray-200 bg-gray-50 text-gray-300">
-                                              <span>{inicio} - {fin}</span>
-                                            </div>
-                                          );
-                                        });
-                                      })()}
+                                        const count = bloquesSlot.length;
+                                        return count > 0 ? (
+                                          <button
+                                            key={inicio}
+                                            onClick={() => setCeldaSeleccionadaDisp({ dia, hora: inicio, fecha: fechaStr, bloques: bloquesSlot })}
+                                            className="min-h-[40px] flex flex-col justify-center items-center bg-green-100 hover:bg-green-200 border border-green-500 text-green-900 rounded text-[10px] text-center shadow-sm cursor-pointer"
+                                          >
+                                            <span className="font-bold">{inicio} - {fin}</span>
+                                            <span className="font-semibold">{count} {count === 1 ? 'cupo' : 'cupos'}</span>
+                                          </button>
+                                        ) : (
+                                          <div key={inicio} className="min-h-[40px] flex flex-col justify-center items-center rounded text-[10px] border border-gray-200 bg-gray-50 text-gray-300">
+                                            <span>{inicio} - {fin}</span>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   </td>
                                 )
@@ -1605,17 +1542,7 @@ export default function DashboardCoordinador({ session }) {
                         <tbody>
                           {horasOpcionesAgendamiento.map(hora => {
                             const duracionMin = servicios.find(s => s.id_servicio === servicioFiltroCalendario)?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({
-                                inicio: `${hh}:${mm}`,
-                                fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                              });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                               <tr key={hora}>
                                 <td className="p-2 border-2 border-gray-300 text-center font-bold bg-gray-50 text-gray-600 align-top w-20 text-xs">{hora}</td>
@@ -1927,10 +1854,7 @@ export default function DashboardCoordinador({ session }) {
       )}
 
       {/* Modal de Creación de Bloque (calendario unificado) */}
-      {modalCrear && (() => {
-        const vc = getValidacionCrear();
-        const bloqueoValidacion = !!vc && (vc.esPasada || vc.haySolape);
-        return (
+      {modalCrear && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 max-w-sm w-full shadow-xl">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Publicar Hora</h3>
@@ -1972,49 +1896,40 @@ export default function DashboardCoordinador({ session }) {
                   </select>
                 </div>
 
-                {crearServicioId && (() => {
-                  const hhFija = modalCrear.hora.split(':')[0];
-                  const minutosValidos = getMinutosValidos();
-                  const minSel = crearHoraInicio ? crearHoraInicio.split(':')[1] : '';
-                  return (
+                {crearServicioId && (
                   <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Minuto de inicio</label>
-                    {minutosValidos.length === 0 ? (
-                      <p className="text-xs text-red-600">No quedan minutos libres en la hora {hhFija}:00 (el profesional ya la tiene ocupada). Elige otra hora.</p>
-                    ) : (
-                      <>
-                        <div className="flex items-center gap-2">
-                          <span className="text-lg font-mono font-bold text-gray-800">{hhFija}:</span>
-                          <select
-                            value={minSel}
-                            onChange={(e) => setCrearHoraInicio(e.target.value ? `${hhFija}:${e.target.value}` : '')}
-                            className="p-2 border rounded text-sm w-24"
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Hora de inicio</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {getSubSlotsCrear().map(({ inicio, fin, ocupado, esPasada }) => {
+                        const deshabilitado = ocupado || esPasada;
+                        return (
+                          <button
+                            key={inicio}
+                            disabled={deshabilitado}
+                            onClick={() => setCrearHoraInicio(inicio)}
+                            className={`text-xs py-2 px-1 rounded border transition ${
+                              deshabilitado
+                                ? 'bg-gray-100 text-gray-300 border-gray-200 cursor-not-allowed'
+                                : crearHoraInicio === inicio
+                                ? 'bg-blue-600 text-white border-blue-700 font-bold'
+                                : 'bg-white hover:bg-blue-50 border-gray-300 text-gray-700'
+                            }`}
                           >
-                            <option value="">-- min --</option>
-                            {minutosValidos.map(mv => (
-                              <option key={mv.minuto} value={String(mv.minuto).padStart(2, '0')}>
-                                {String(mv.minuto).padStart(2, '0')}
-                              </option>
-                            ))}
-                          </select>
-                          {vc && (
-                            <span className="text-sm text-gray-600">→ termina <strong>{vc.fin}</strong> <span className="text-gray-400">({vc.duracion} min)</span></span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-gray-400 mt-1">La hora de inicio es <strong>{hhFija}:00</strong>; elige el minuto exacto. Solo se muestran los minutos que no se solapan con otro bloque del profesional. Se repite cada semana hasta fin de año.</p>
-                      </>
-                    )}
+                            {inicio} - {fin}{ocupado ? ' (ocupado)' : ''}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                  );
-                })()}
+                )}
               </>
             )}
 
             <div className="flex flex-col gap-3 mt-2">
               <button
                 onClick={crearBloqueEnCelda}
-                disabled={!crearServicioId || !crearHoraInicio || !crearUbicacionId || creandoBloque || bloqueoValidacion}
-                className={`font-bold py-2 px-4 rounded transition ${(!crearServicioId || !crearHoraInicio || !crearUbicacionId || creandoBloque || bloqueoValidacion) ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-700 hover:bg-blue-800 text-white'}`}
+                disabled={!crearServicioId || !crearHoraInicio || !crearUbicacionId || creandoBloque}
+                className={`font-bold py-2 px-4 rounded transition ${(!crearServicioId || !crearHoraInicio || !crearUbicacionId || creandoBloque) ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-700 hover:bg-blue-800 text-white'}`}
               >
                 {creandoBloque ? 'Publicando...' : 'Publicar (hasta fin de año)'}
               </button>
@@ -2027,8 +1942,7 @@ export default function DashboardCoordinador({ session }) {
             </div>
           </div>
         </div>
-        );
-      })()}
+      )}
 
       {/* Modal Detalle de Reservas Coordinador */}
       {celdaSeleccionadaReservas && (
@@ -2136,17 +2050,7 @@ export default function DashboardCoordinador({ session }) {
                         <tbody>
                           {horasOpcionesAgendamiento.map(hora => {
                             const duracionMin = servicios.find(s => s.id_servicio === servicioSeleccionado)?.duracion_minutos || 60;
-                            const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                            const subSlots = [];
-                            for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                              const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                              const mm = String(m % 60).padStart(2, '0');
-                              const endMin = m + duracionMin;
-                              subSlots.push({
-                                inicio: `${hh}:${mm}`,
-                                fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                              });
-                            }
+                            const subSlots = getSubSlots(hora, duracionMin);
                             return (
                             <tr key={hora}>
                               <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 align-top w-20 text-xs">{hora}</td>
@@ -2155,10 +2059,11 @@ export default function DashboardCoordinador({ session }) {
                                 return (
                                   <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                     <div className="flex flex-col gap-1">
-                                      {mergeSlotsConBloques(subSlots, celdas, duracionMin).map(({ inicio, fin, bloques }) => {
+                                      {subSlots.map(({ inicio, fin }) => {
                                         // Un bloque por campus disponible en este horario (getBlocksForCell ya deduplica por hora+campus).
-                                        return bloques.length > 0 ? (
-                                          bloques.map(bloque => (
+                                        const bloquesSlot = celdas.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
+                                        return bloquesSlot.length > 0 ? (
+                                          bloquesSlot.map(bloque => (
                                             <button key={`${inicio}-${bloque.id_bloque}`} onClick={() => { setBloqueSeleccionado(bloque); setPasoAgendar(tipoAgendamiento === 'prioritario' ? 3 : 4); }} className="min-h-[40px] flex flex-col justify-center items-center bg-green-100 hover:bg-green-200 border border-green-500 text-green-900 rounded text-[10px] text-center shadow-sm cursor-pointer">
                                               <span className="font-bold">{inicio} - {fin}</span>
                                               <span className="font-semibold text-[9px]">📍 {bloque.ubicacion?.nombre || 'Sin ubicación'}</span>
@@ -2200,14 +2105,7 @@ export default function DashboardCoordinador({ session }) {
                     <tbody>
                       {horasOpcionesAgendamiento.map(hora => {
                         const duracionMin = servicios.find(s => s.id_servicio === servicioSeleccionado)?.duracion_minutos || 60;
-                        const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                        const subSlots = [];
-                        for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                          const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                          const mm = String(m % 60).padStart(2, '0');
-                          const endMin = m + duracionMin;
-                          subSlots.push({ inicio: `${hh}:${mm}`, fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}` });
-                        }
+                        const subSlots = getSubSlots(hora, duracionMin);
                         return (
                         <tr key={hora}>
                           <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 text-xs">{hora}</td>

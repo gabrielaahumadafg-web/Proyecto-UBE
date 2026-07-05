@@ -55,54 +55,6 @@ export function getBlocksForCell(blocks, fechaBase, diaIndex, hora) {
 }
 
 /**
- * Combina los sub-slots "teóricos" de una hora (alineados a la hora, con paso =
- * duración del servicio: p. ej. 09:00, 09:20, 09:40) con los bloques REALES de esa
- * celda. Soporta bloques que empiezan en CUALQUIER minuto (p. ej. 12:10, 12:45), no
- * solo en los múltiplos de la duración — necesario desde que el coordinador puede
- * publicar horarios a la hora exacta (estilo Google Calendar).
- *
- * Devuelve una lista ordenada por hora de inicio. Cada entrada es
- * `{ inicio, fin, bloques }`:
- *   - sub-slot teórico sin cupos → `bloques` vacío (se pinta como celda gris).
- *   - bloque(s) real(es) a esa hora → `bloques` con los bloques de ese minuto (uno
- *     por campus si `getBlocksForCell` ya dedup­licó), y `fin` tomado del propio
- *     bloque (`fecha_hora_fin`) para reflejar su duración real.
- * Un minuto teórico que coincide con un bloque real NO se duplica: gana el real.
- *
- * @param {Array}  subSlots     - sub-slots teóricos [{inicio, fin}] de la hora
- * @param {Array}  bloquesCelda - bloques reales de la celda (día+hora)
- * @param {number} duracionMin  - duración del servicio (fallback para calcular `fin`)
- * @returns {Array<{inicio:string, fin:string, bloques:Array}>}
- */
-export function mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin = 60) {
-  const grupos = new Map(); // "HH:MM" -> { inicio, fin, bloques: [] }
-  (Array.isArray(bloquesCelda) ? bloquesCelda : []).forEach(b => {
-    if (!b?.fecha_hora_inicio) return;
-    const inicio = b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5);
-    if (!grupos.has(inicio)) {
-      let fin = b.fecha_hora_fin
-        ? b.fecha_hora_fin.replace(' ', 'T').split('T')[1].substring(0, 5)
-        : null;
-      if (!fin) {
-        const [h, m] = inicio.split(':').map(Number);
-        const finMin = h * 60 + m + duracionMin;
-        fin = `${String(Math.floor(finMin / 60)).padStart(2, '0')}:${String(finMin % 60).padStart(2, '0')}`;
-      }
-      grupos.set(inicio, { inicio, fin, bloques: [] });
-    }
-    grupos.get(inicio).bloques.push(b);
-  });
-
-  const entradas = [];
-  (Array.isArray(subSlots) ? subSlots : []).forEach(s => {
-    if (!grupos.has(s.inicio)) entradas.push({ inicio: s.inicio, fin: s.fin, bloques: [] });
-  });
-  grupos.forEach(g => entradas.push(g));
-  entradas.sort((a, b) => a.inicio.localeCompare(b.inicio));
-  return entradas;
-}
-
-/**
  * Construye un Set de claves "dia|HH:MM" (día en minúsculas sin tilde:
  * lunes, martes, miercoles, jueves, viernes) a partir de los bloques con
  * disponibilidad. Sirve para deshabilitar esos slots en las grillas de
@@ -153,4 +105,41 @@ export function deduplicateCyclicBlocks(blocks, isCyclic) {
   return Object.values(unicos).sort((a, b) =>
     new Date(a.fecha_hora_inicio) - new Date(b.fecha_hora_inicio)
   );
+}
+
+/**
+ * Genera los sub-slots de una fila-hora del calendario, ENCADENADOS de forma
+ * continua desde el inicio del día (08:00). Todos los servicios arrancan a las
+ * 08:00 y cada slot dura `duracionMin`. Para servicios cuya duración NO divide 60
+ * (ej. 45 min) los slots no se reinician cada hora: 08:00-08:45, 08:45-09:30,
+ * 09:30-10:15… Cada slot aparece en la fila-hora donde arranca; una fila puede
+ * quedar con 0, 1 o 2 slots. Se topea en 18:00 (ningún slot termina después).
+ *
+ * Para duraciones que sí dividen 60 (60/30/20/15) el resultado es idéntico al
+ * alineado de siempre (cada fila = HH:00 en adelante), así que las grillas de esos
+ * servicios se ven exactamente igual que antes.
+ *
+ * @param {string} hora        - fila-hora del grid, "08:00" … "17:00"
+ * @param {number} duracionMin - duración del servicio en minutos (fallback 60)
+ * @returns {Array<{inicio: string, fin: string}>}
+ */
+export function getSubSlots(hora, duracionMin) {
+  const dur = duracionMin || 60;
+  const DIA_INICIO = 8 * 60;   // 08:00 — primera hora de TODOS los servicios
+  const DIA_FIN = 18 * 60;     // 18:00 — tope: ningún slot puede terminar después
+  const filaInicio = parseInt(hora.split(':')[0], 10) * 60;
+  const filaFin = filaInicio + 60;
+  const fmt = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const slots = [];
+  // Primer eslabón de la cadena continua (desde las 08:00) cuyo inicio cae en esta fila.
+  const offset = filaInicio - DIA_INICIO;
+  let k = offset > 0 ? Math.ceil(offset / dur) : 0;
+  for (;;) {
+    const ini = DIA_INICIO + k * dur;
+    if (ini >= filaFin) break;
+    const fin = ini + dur;
+    if (ini >= filaInicio && fin <= DIA_FIN) slots.push({ inicio: fmt(ini), fin: fmt(fin) });
+    k++;
+  }
+  return slots;
 }

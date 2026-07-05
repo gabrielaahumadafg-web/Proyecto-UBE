@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { API_URL } from './config';
-import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, mergeSlotsConBloques } from './utils/calendarUtils';
+import { getLunes, getBlocksForCell, deduplicateCyclicBlocks, getSlotsConDisponibilidad, getSubSlots } from './utils/calendarUtils';
 
 export default function AgendarHora({ session }) {
   const [paso, setPaso] = useState(1);
@@ -530,17 +530,7 @@ export default function AgendarHora({ session }) {
                   </thead>
                   <tbody>
                     {horasOpciones.map(hora => {
-                      const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                      const subSlots = [];
-                      for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                        const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                        const mm = String(m % 60).padStart(2, '0');
-                        const endMin = m + duracionMin;
-                        subSlots.push({
-                          inicio: `${hh}:${mm}`,
-                          fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                        });
-                      }
+                      const subSlots = getSubSlots(hora, duracionMin);
                       return (
                         <tr key={hora}>
                           <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 align-top w-20 text-xs">
@@ -551,11 +541,12 @@ export default function AgendarHora({ session }) {
                             return (
                               <td key={i} className="border-2 border-gray-300 p-1 align-top bg-white">
                                 <div className="flex flex-col gap-1">
-                                  {mergeSlotsConBloques(subSlots, bloquesCelda, duracionMin).map(({ inicio, fin, bloques }) => {
-                                    return bloques.length > 0 ? (
+                                  {subSlots.map(({ inicio, fin }) => {
+                                    const bloquesEnSlot = bloquesCelda.filter(b => b.fecha_hora_inicio.replace(' ', 'T').split('T')[1].substring(0, 5) === inicio);
+                                    return bloquesEnSlot.length > 0 ? (
                                       <button
                                         key={inicio}
-                                        onClick={() => abrirSeleccionSlot(bloques)}
+                                        onClick={() => abrirSeleccionSlot(bloquesEnSlot)}
                                         className="h-[40px] flex flex-col justify-center items-center bg-green-100 hover:bg-green-200 border border-green-500 text-green-900 rounded text-[10px] text-center shadow-sm transition cursor-pointer"
                                       >
                                         <span className="font-bold">{inicio} - {fin}</span>
@@ -640,17 +631,7 @@ export default function AgendarHora({ session }) {
               </thead>
               <tbody>
                 {['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'].map(hora => {
-                  const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                  const subSlots = [];
-                  for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                    const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                    const mm = String(m % 60).padStart(2, '0');
-                    const endMin = m + duracionMin;
-                    subSlots.push({
-                      inicio: `${hh}:${mm}`,
-                      fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                    });
-                  }
+                  const subSlots = getSubSlots(hora, duracionMin);
                   return (
                     <tr key={hora}>
                       <td className="p-2 border-2 border-gray-300 text-center font-bold text-gray-500 bg-gray-50 text-xs w-20">

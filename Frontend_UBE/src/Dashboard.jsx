@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { API_URL } from './config';
 import { supabase } from './supabaseClient'
 import AgendarHora from './AgendarHora'
+import { getSubSlots } from './utils/calendarUtils'
 
 function Dashboard({ session }) {
   const [servicios, setServicios] = useState([])
@@ -779,17 +780,7 @@ function Dashboard({ session }) {
                                 </thead>
                                 <tbody>
                                   {horasOpciones.map(hora => {
-                                    const startMin = parseInt(hora.split(':')[0], 10) * 60;
-                                    const subSlots = [];
-                                    for (let m = startMin; m + duracionMin <= startMin + 60; m += duracionMin) {
-                                      const hh = String(Math.floor(m / 60)).padStart(2, '0');
-                                      const mm = String(m % 60).padStart(2, '0');
-                                      const endMin = m + duracionMin;
-                                      subSlots.push({
-                                        inicio: `${hh}:${mm}`,
-                                        fin: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`
-                                      });
-                                    }
+                                    const subSlots = getSubSlots(hora, duracionMin);
                                     return (
                                       <tr key={hora}>
                                         <td className="p-2 border-b border-r bg-gray-50 text-gray-500 font-medium align-top">{hora}</td>
