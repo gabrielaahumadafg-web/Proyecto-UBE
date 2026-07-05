@@ -76,7 +76,18 @@ async def obtener_ubicaciones(activo: bool = Query(None)):
 
 
 @router.get("/disponibilidad")
-async def obtener_disponibilidad(id_servicio: str = Query(...)):
+async def obtener_disponibilidad(
+    id_servicio: str = Query(...),
+    ventana_dias: int | None = Query(
+        None,
+        description=(
+            "Si se indica (>0), solo devuelve bloques dentro de los próximos N días. "
+            "El flujo del estudiante pasa 14: solo puede agendar dentro de las próximas "
+            "2 semanas y más allá queda en lista de espera. El personal "
+            "(admin/coordinador/profesional) lo omite para agendar sin tope."
+        ),
+    ),
+):
     try:
         servicio_req = supabase.table("servicio").select("es_ciclico").eq("id_servicio", id_servicio).execute()
         if not servicio_req.data:
@@ -90,7 +101,13 @@ async def obtener_disponibilidad(id_servicio: str = Query(...)):
             q = supabase.table("bloque_horario").select(
                 "id_bloque, fecha_hora_inicio, fecha_hora_fin, profesional(nombres, apellidos), ubicacion(id_ubicacion, nombre)"
             ).eq("id_servicio", id_servicio).eq("estado", "disponible").gt("fecha_hora_inicio", ahora_str)
-            if es_ciclico:
+            # Tope de ventana. El estudiante manda ventana_dias=14: TODOS los servicios se
+            # acotan a las próximas 2 semanas (lo de más allá solo se resuelve por lista de
+            # espera). Sin el parámetro (personal) se mantiene el tope histórico de 14 días
+            # solo para servicios cíclicos, cuya serie semanal generaría miles de bloques.
+            if ventana_dias and ventana_dias > 0:
+                q = q.lte("fecha_hora_inicio", (ahora_local + timedelta(days=ventana_dias)).isoformat())
+            elif es_ciclico:
                 q = q.lte("fecha_hora_inicio", (ahora_local + timedelta(days=14)).isoformat())
             return q
 

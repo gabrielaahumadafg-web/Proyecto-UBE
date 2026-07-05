@@ -44,9 +44,27 @@ export default function AgendarHora({ session }) {
 
   const [fechaBaseSemana, setFechaBaseSemana] = useState(getLunes(new Date()));
 
+  // Ventana de agendamiento del estudiante: solo puede ver/reservar dentro de las
+  // próximas 2 semanas. Más allá de eso NO puede tomar un cupo (aunque un slot esté
+  // copado hoy no salta al mismo día de 3 semanas más): solo queda lista de espera.
+  const VENTANA_DIAS = 14;
+  const claveSemana = (d) => { const m = new Date(d); m.setHours(0, 0, 0, 0); return m.getTime(); };
+  const semanaMin = claveSemana(getLunes(new Date()));
+  const semanaMax = (() => {
+    const tope = new Date();
+    tope.setDate(tope.getDate() + VENTANA_DIAS);
+    return claveSemana(getLunes(tope));
+  })();
+  const semanaActualBase = claveSemana(fechaBaseSemana);
+  const puedeRetroceder = semanaActualBase > semanaMin;
+  const puedeAvanzar = semanaActualBase < semanaMax;
+
   const cambiarSemana = (dias) => {
     const nueva = new Date(fechaBaseSemana);
     nueva.setDate(nueva.getDate() + dias);
+    const clave = claveSemana(nueva);
+    // No salir de la ventana de 2 semanas.
+    if (clave < semanaMin || clave > semanaMax) return;
     setFechaBaseSemana(nueva);
   };
 
@@ -130,7 +148,7 @@ export default function AgendarHora({ session }) {
     
     // Buscar disponibilidad para este servicio
     try {
-      const respuesta = await fetch(`${API_URL}/disponibilidad?id_servicio=${servicio.id_servicio}`, {
+      const respuesta = await fetch(`${API_URL}/disponibilidad?id_servicio=${servicio.id_servicio}&ventana_dias=${VENTANA_DIAS}`, {
         headers: { "Authorization": `Bearer ${session.access_token}` }
       });
       if (respuesta.ok) {
@@ -455,6 +473,7 @@ export default function AgendarHora({ session }) {
             <div>
               <h3 className="text-lg font-bold text-blue-900">Horarios para {servicioSeleccionado.nombre}</h3>
               <p className="text-sm text-gray-600">Presiona la fecha y el bloque en el calendario para reservar.</p>
+              <p className="text-xs text-gray-500 mt-1">Solo puedes agendar dentro de las próximas 2 semanas. Si no encuentras un cupo que te sirva, anótate en la lista de espera.</p>
             </div>
             <button
               onClick={() => { setDisponibilidad({}); setPaso(3); }}
@@ -504,11 +523,19 @@ export default function AgendarHora({ session }) {
               <div className="flex justify-between items-center mb-4">
                 <h4 className="font-bold text-gray-700">Selecciona tu hora:</h4>
                 <div className="flex space-x-2">
-                  <button onClick={() => cambiarSemana(-7)} className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 font-bold">&larr; Ant</button>
+                  <button
+                    onClick={() => cambiarSemana(-7)}
+                    disabled={!puedeRetroceder}
+                    className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 font-bold disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-200"
+                  >&larr; Ant</button>
                   <span className="px-4 py-1 font-semibold border rounded bg-white">
                     Semana del {fechaBaseSemana.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}
                   </span>
-                  <button onClick={() => cambiarSemana(7)} className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 font-bold">Sig &rarr;</button>
+                  <button
+                    onClick={() => cambiarSemana(7)}
+                    disabled={!puedeAvanzar}
+                    className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 font-bold disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-200"
+                  >Sig &rarr;</button>
                 </div>
               </div>
 

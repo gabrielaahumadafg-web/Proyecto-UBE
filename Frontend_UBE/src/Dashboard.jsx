@@ -248,7 +248,7 @@ function Dashboard({ session }) {
     setBloquesDisponiblesServicio([]);
     if (ubicaciones.length === 0) await cargarUbicaciones();
     try {
-      const res = await fetch(`${API_URL}/disponibilidad?id_servicio=${espera.id_servicio}`);
+      const res = await fetch(`${API_URL}/disponibilidad?id_servicio=${espera.id_servicio}&ventana_dias=14`);
       if (res.ok) setBloquesDisponiblesServicio(await res.json());
     } catch (e) { console.error(e); }
   };
