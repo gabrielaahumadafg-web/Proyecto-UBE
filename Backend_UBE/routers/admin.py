@@ -81,7 +81,7 @@ async def asignar_hora_manual(datos: SolicitudAsignacionManual, usuario_actual: 
             proceso_ins = supabase.table("proceso_clinico").insert({"id_estudiante": espera["id_estudiante"], "id_servicio": espera["id_servicio"], "motivo_consulta": espera["motivo_consulta"], "puntaje_triage": espera.get("puntaje_triage")}).execute()
             id_proceso = proceso_ins.data[0]["id_proceso"]
 
-        await _procesar_reserva_bloques(id_proceso, datos.id_bloque)
+        await _procesar_reserva_bloques(id_proceso, datos.id_bloque, espera.get("fecha_ingreso"))
         supabase.table("lista_espera").delete().eq("id_lista", datos.id_lista).execute()
         await notificar_reserva_directa(espera["id_estudiante"], datos.id_bloque)
         return {"mensaje": "Hora asignada y emparejamiento completado."}
@@ -757,7 +757,11 @@ async def agendar_hora_admin(datos: SolicitudAgendarHoraAdmin, usuario_actual: d
             candidatos_q = candidatos_q.eq("id_ubicacion", id_ubicacion_bloque) if id_ubicacion_bloque else candidatos_q.is_("id_ubicacion", "null")
             candidatos_req = candidatos_q.execute()
             id_bloque_final = _seleccionar_mejor_bloque(candidatos_req.data) if candidatos_req.data else datos.id_bloque
-            await _procesar_reserva_bloques(id_proceso, id_bloque_final)
+            # Si el estudiante venía esperando en la lista, preservar su fecha de ingreso para
+            # poder medir después el tramo de espera por lista de espera (se borra abajo).
+            espera_prev = supabase.table("lista_espera").select("fecha_ingreso").eq("id_estudiante", datos.id_estudiante).eq("id_servicio", datos.id_servicio).order("fecha_ingreso", desc=False).limit(1).execute()
+            fecha_ingreso_prev = espera_prev.data[0]["fecha_ingreso"] if espera_prev.data else None
+            await _procesar_reserva_bloques(id_proceso, id_bloque_final, fecha_ingreso_prev)
             supabase.table("lista_espera").delete().eq("id_estudiante", datos.id_estudiante).eq("id_servicio", datos.id_servicio).execute()
             await notificar_reserva_directa(datos.id_estudiante, id_bloque_final)
 

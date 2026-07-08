@@ -280,7 +280,7 @@ async def responder_oferta(datos: SolicitudRespuestaOferta, usuario_actual: dict
             else:
                 proceso_ins = supabase.table("proceso_clinico").insert({"id_estudiante": id_estudiante, "id_servicio": oferta["id_servicio"], "motivo_consulta": oferta["motivo_consulta"], "puntaje_triage": oferta.get("puntaje_triage")}).execute()
                 id_proceso = proceso_ins.data[0]["id_proceso"]
-            await _procesar_reserva_bloques(id_proceso, id_bloque)
+            await _procesar_reserva_bloques(id_proceso, id_bloque, oferta.get("fecha_ingreso"))
             supabase.table("lista_espera").delete().eq("id_lista", datos.id_lista).execute()
             await notificar_reserva_directa(id_estudiante, id_bloque)
             return {"mensaje": "Oferta aceptada. Reserva generada exitosamente."}

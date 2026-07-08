@@ -55,10 +55,32 @@ def _tiene_conflicto_horario(id_estudiante: str, fecha_hora_inicio_iso: str, id_
     return False
 
 
-async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str):
+def _guardar_fecha_ingreso_lista(reserva_rows, fecha_ingreso_lista):
+    """Mejor esfuerzo: guarda en la(s) reserva(s) recién creada(s) la fecha en que el
+    estudiante entró a la lista de espera (`fecha_ingreso_lista`), para poder medir después
+    el tramo de espera 'por lista de espera' (click en lista → asignación del cupo).
+    Solo aplica a asignaciones que vienen de la lista de espera; en reservas directas es None
+    (la espera total es solo el tramo reserva). Va en try/except porque la columna puede no
+    existir todavía si aún no se corrió la migración — un fallo aquí no debe romper la reserva."""
+    if not fecha_ingreso_lista or not reserva_rows:
+        return
+    try:
+        ids = [r["id_reserva"] for r in reserva_rows if r.get("id_reserva")]
+        if ids:
+            supabase.table("reserva").update(
+                {"fecha_ingreso_lista": fecha_ingreso_lista}
+            ).in_("id_reserva", ids).execute()
+    except Exception as e:
+        print(f"[espera] no se pudo guardar fecha_ingreso_lista (¿falta migración?): {e}")
+
+
+async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str, fecha_ingreso_lista: str | None = None):
     """
     Procesa la reserva de un bloque. Para servicios cíclicos, reserva toda la serie futura
     hasta el tope de sesiones. Marca el primero como 'confirmado' y el resto como 'reservado'.
+
+    `fecha_ingreso_lista` (opcional): fecha de ingreso a la lista de espera, que se preserva en
+    la reserva para medir después el tramo de espera por lista de espera. None en reservas directas.
     """
     bloque_req = supabase.table("bloque_horario").select("id_profesional, id_servicio, fecha_hora_inicio").eq("id_bloque", id_bloque_final).execute()
     if not bloque_req.data:
@@ -99,6 +121,7 @@ async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str):
         if not id_bloques_serie:
             supabase.table("bloque_horario").update({"estado": "confirmado"}).eq("id_bloque", id_bloque_final).execute()
             reserva_ins = supabase.table("reserva").insert({"id_proceso": id_proceso, "id_bloque": id_bloque_final, "estado": "pendiente"}).execute()
+            _guardar_fecha_ingreso_lista(reserva_ins.data, fecha_ingreso_lista)
             return reserva_ins.data[0] if reserva_ins.data else {}
 
         supabase.table("bloque_horario").update({"estado": "confirmado"}).eq("id_bloque", id_bloques_serie[0]).execute()
@@ -116,6 +139,7 @@ async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str):
 
         reservas_ins = [{"id_proceso": id_proceso, "id_bloque": b_id, "estado": "pendiente"} for b_id in id_bloques_serie]
         reserva_ins = supabase.table("reserva").insert(reservas_ins).execute()
+        _guardar_fecha_ingreso_lista(reserva_ins.data, fecha_ingreso_lista)
         return reserva_ins.data[0] if reserva_ins.data else {}
     else:
         supabase.table("bloque_horario").update({"estado": "confirmado"}).eq("id_bloque", id_bloque_final).execute()
@@ -124,6 +148,7 @@ async def _procesar_reserva_bloques(id_proceso: str, id_bloque_final: str):
             "id_bloque": id_bloque_final,
             "estado": "pendiente"
         }).execute()
+        _guardar_fecha_ingreso_lista(reserva_ins.data, fecha_ingreso_lista)
         return reserva_ins.data[0] if reserva_ins.data else {}
 
 
@@ -373,7 +398,7 @@ async def _attempt_automatic_assignment(id_bloque_disponible: str):
         hora_str = fecha_hora_inicio.strftime("%H:%M")
 
         lista_espera_req = supabase.table("lista_espera").select(
-            "id_lista, id_estudiante, disponibilidad_indicada, campus_indicados, campus_por_slot, motivo_consulta, puntaje_triage"
+            "id_lista, id_estudiante, disponibilidad_indicada, campus_indicados, campus_por_slot, motivo_consulta, puntaje_triage, fecha_ingreso"
         ).eq("id_servicio", id_servicio).eq("estado_oferta", "esperando").order("es_prioritario", desc=True).order("fecha_ingreso", desc=False).execute()
 
         estudiante_asignado = None
@@ -428,7 +453,7 @@ async def _attempt_automatic_assignment(id_bloque_disponible: str):
             }).execute()
             id_proceso = proceso_ins.data[0]["id_proceso"]
 
-        await _procesar_reserva_bloques(id_proceso, id_bloque_disponible)
+        await _procesar_reserva_bloques(id_proceso, id_bloque_disponible, estudiante_asignado.get("fecha_ingreso"))
         supabase.table("lista_espera").delete().eq("id_lista", id_lista_asignada).execute()
 
         await notificar_asignacion_automatica(
@@ -521,7 +546,7 @@ async def _attempt_automatic_assignment_for_student(id_lista: str):
                     }).execute()
                     id_proceso = proceso_ins.data[0]["id_proceso"]
 
-                await _procesar_reserva_bloques(id_proceso, id_bloque_final)
+                await _procesar_reserva_bloques(id_proceso, id_bloque_final, estudiante.get("fecha_ingreso"))
                 supabase.table("lista_espera").delete().eq("id_lista", id_lista).execute()
 
                 await notificar_asignacion_automatica(

@@ -577,51 +577,62 @@ export default function DashboardProfesionalApoyo({ session }) {
               )}
             </div>
 
-            {/* Métrica 2: días de espera por reserva vs lista de espera */}
+            {/* Métrica 2: espera promedio total por estudiante, desglosada en lista de espera + reserva */}
             <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-              <h3 className="font-bold text-gray-800 mb-1">Días de Espera: Reserva vs Lista de Espera</h3>
+              <h3 className="font-bold text-gray-800 mb-1">Espera Promedio por Estudiante (hasta ser atendido)</h3>
               <p className="text-xs text-gray-500 mb-4">
-                <strong>Por reserva:</strong> días entre reservar y la cita. <strong>Por lista de espera:</strong> días acumulados de quienes siguen esperando una hora.
+                Promedio de días que espera un estudiante desde que inicia (clic en reservar o en lista de espera) hasta su atención, dividido en sus dos tramos <strong>sumables</strong>: tiempo en lista de espera + tiempo desde la reserva hasta la cita. Solo cuenta atenciones ya recibidas.
               </p>
               {cargandoOcupEspera ? (
                 <div className="h-72 flex items-center justify-center text-gray-400">Cargando...</div>
-              ) : !esperaComparativa ? (
-                <div className="h-72 flex items-center justify-center text-gray-400 italic">Sin datos de espera.</div>
+              ) : !esperaComparativa || !esperaComparativa.cantidad ? (
+                <div className="h-72 flex items-center justify-center text-gray-400 italic">Sin atenciones registradas en el período.</div>
               ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                  <div className="lg:col-span-2">
-                    <ResponsiveContainer width="100%" height={288}>
-                      <BarChart
-                        data={[
-                          { nombre: 'Por Reserva', dias: esperaComparativa.reserva.total_dias, color: COLOR_BARRA },
-                          { nombre: 'Por Lista de Espera', dias: esperaComparativa.lista_espera.total_dias, color: COLOR_ATRASO },
-                        ]}
-                        margin={{ top: 5, right: 20, bottom: 5, left: 0 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                        <XAxis dataKey="nombre" tick={{ fontSize: 12 }} />
-                        <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
-                        <Tooltip formatter={(v) => [`${v} días`, 'Total acumulado']} />
-                        <Bar dataKey="dias" name="Días acumulados" radius={[4, 4, 0, 0]}>
-                          <Cell fill={COLOR_BARRA} />
-                          <Cell fill={COLOR_ATRASO} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <div className="flex flex-col gap-4 justify-center">
-                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-4">
-                      <p className="text-sm font-bold text-blue-900 mb-1">Por Reserva</p>
-                      <p className="text-2xl font-bold text-gray-800">{esperaComparativa.reserva.total_dias} <span className="text-sm font-medium text-gray-500">días</span></p>
-                      <p className="text-xs text-gray-500 mt-1">{esperaComparativa.reserva.cantidad} reservas · {esperaComparativa.reserva.promedio} días promedio</p>
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2">
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart
+                          layout="vertical"
+                          data={[{
+                            nombre: 'Espera promedio',
+                            espera: esperaComparativa.lista_espera.promedio,
+                            reserva: esperaComparativa.reserva.promedio,
+                          }]}
+                          margin={{ top: 5, right: 30, bottom: 5, left: 10 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 12 }} unit=" d" />
+                          <YAxis type="category" dataKey="nombre" tick={{ fontSize: 12 }} width={90} />
+                          <Tooltip formatter={(v, n) => [`${v} días`, n]} />
+                          <Legend />
+                          <Bar dataKey="espera" stackId="a" name="Lista de espera" fill={COLOR_ATRASO} />
+                          <Bar dataKey="reserva" stackId="a" name="Reserva" fill={COLOR_BARRA} radius={[0, 4, 4, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
-                    <div className="bg-yellow-50 border border-yellow-100 rounded-lg p-4">
-                      <p className="text-sm font-bold text-yellow-800 mb-1">Por Lista de Espera</p>
-                      <p className="text-2xl font-bold text-gray-800">{esperaComparativa.lista_espera.total_dias} <span className="text-sm font-medium text-gray-500">días</span></p>
-                      <p className="text-xs text-gray-500 mt-1">{esperaComparativa.lista_espera.cantidad} esperando · {esperaComparativa.lista_espera.promedio} días promedio</p>
+                    <div className="flex flex-col gap-3 justify-center">
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
+                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Espera total promedio</p>
+                        <p className="text-3xl font-bold text-gray-800">{esperaComparativa.promedio_total} <span className="text-base font-medium text-gray-500">días</span></p>
+                      </div>
+                      <div className="bg-yellow-50 border border-yellow-100 rounded-lg p-3">
+                        <p className="text-sm font-bold text-yellow-800">Lista de espera</p>
+                        <p className="text-xl font-bold text-gray-800">{esperaComparativa.lista_espera.promedio} <span className="text-xs font-medium text-gray-500">días · {esperaComparativa.lista_espera.porcentaje}%</span></p>
+                      </div>
+                      <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                        <p className="text-sm font-bold text-blue-900">Reserva</p>
+                        <p className="text-xl font-bold text-gray-800">{esperaComparativa.reserva.promedio} <span className="text-xs font-medium text-gray-500">días · {esperaComparativa.reserva.porcentaje}%</span></p>
+                      </div>
                     </div>
                   </div>
-                </div>
+                  <p className="text-[11px] text-gray-400 mt-3">
+                    Basado en {esperaComparativa.cantidad} {esperaComparativa.cantidad === 1 ? 'atención ya recibida' : 'atenciones ya recibidas'}.
+                    {esperaComparativa.datos_lista_espera_disponibles === false
+                      ? ' El registro del tiempo en lista de espera aún no está activo (falta correr la migración): por ahora todo se cuenta como tramo de reserva.'
+                      : ' El tiempo en lista de espera se registra desde su activación; las atenciones anteriores pueden mostrar ese tramo en 0.'}
+                  </p>
+                </>
               )}
             </div>
           </div>

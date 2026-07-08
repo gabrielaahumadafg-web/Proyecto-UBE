@@ -442,38 +442,59 @@ async def reporte_espera_comparativa(
     id_servicio: Optional[str] = None,
     usuario_actual: dict = Depends(obtener_usuario_actual)
 ):
-    """Compara los días de espera de dos caminos distintos:
+    """Promedio de espera TOTAL de un estudiante hasta ser atendido, desglosado en dos tramos
+    **sumables**: el tiempo en lista de espera y el tiempo desde que se reservó hasta la cita.
 
-    - **Por reserva**: días entre que el estudiante reservó (`reserva.fecha_creacion`) y la
-      fecha de su cita (`bloque_horario.fecha_hora_inicio`). Excluye reservas canceladas.
-      El rango de fechas filtra por fecha de la cita.
-    - **Por lista de espera**: días desde que el estudiante entró a la lista (`fecha_ingreso`)
-      hasta ahora, para los que **siguen esperando** (`estado_oferta = 'esperando'`). Es la única
-      espera medible, porque al asignar una hora la fila de lista_espera se elimina.
+    Para cada atención ya recibida (una por proceso: la primera cita que ya ocurrió y no fue
+    cancelada):
+      - `t_inicio`  = `reserva.fecha_ingreso_lista` si el estudiante venía de la lista de espera;
+                      si no (reserva directa), `reserva.fecha_creacion`.
+      - `t_reserva` = cita (`bloque_horario.fecha_hora_inicio`) − `reserva.fecha_creacion`  → tramo reserva.
+      - `t_espera`  = `reserva.fecha_creacion` − `t_inicio`                                  → tramo lista de espera (0 si fue directa).
+      - `t_total`   = `t_reserva` + `t_espera` = cita − `t_inicio`.
 
-    Devuelve total de días acumulados, cantidad y promedio por cada camino.
+    Devuelve el promedio total por estudiante y qué parte (promedio en días y % del total)
+    corresponde a cada tramo, de modo que `reserva.promedio + lista_espera.promedio ≈ promedio_total`.
+
+    Nota: `fecha_ingreso_lista` se empezó a registrar recién; las atenciones anteriores a la
+    migración no tienen el dato y su tramo de lista de espera cuenta como 0. Si la columna aún
+    no existe, `datos_lista_espera_disponibles` viene en False (todo se mide como reserva directa).
     """
     if usuario_actual["rol"] not in ROLES_REPORTES:
         raise HTTPException(status_code=403, detail="Acceso denegado.")
     try:
         ff = _fin_dia(fecha_fin)
+        ahora = datetime.utcnow()  # timestamps se guardan como timestamptz (UTC)
 
-        # --- Espera por reserva: días entre la creación de la reserva y la cita ---
-        def query_reservas():
-            q = supabase.table("reserva").select(
-                "fecha_creacion, estado, bloque_horario!inner(fecha_hora_inicio, id_servicio)"
-            )
-            if fecha_inicio:
-                q = q.gte("bloque_horario.fecha_hora_inicio", fecha_inicio)
-            if ff:
-                q = q.lte("bloque_horario.fecha_hora_inicio", ff)
-            if id_servicio:
-                q = q.eq("bloque_horario.id_servicio", id_servicio)
+        def build_query(incluir_ingreso_lista):
+            cols = "fecha_creacion, estado, id_proceso, bloque_horario!inner(fecha_hora_inicio, id_servicio)"
+            if incluir_ingreso_lista:
+                cols = "fecha_creacion, fecha_ingreso_lista, estado, id_proceso, bloque_horario!inner(fecha_hora_inicio, id_servicio)"
+
+            def q():
+                query = supabase.table("reserva").select(cols)
+                if fecha_inicio:
+                    query = query.gte("bloque_horario.fecha_hora_inicio", fecha_inicio)
+                if ff:
+                    query = query.lte("bloque_horario.fecha_hora_inicio", ff)
+                if id_servicio:
+                    query = query.eq("bloque_horario.id_servicio", id_servicio)
+                return query
             return q
 
-        reservas = fetch_all(query_reservas)
-        total_dias_res = 0.0
-        cant_res = 0
+        # La columna fecha_ingreso_lista puede no existir aún (migración pendiente): si la
+        # consulta falla, reintentar sin ella (todo se mide como reserva directa, tramo espera=0).
+        datos_lista_disponibles = True
+        try:
+            reservas = fetch_all(build_query(True))
+        except Exception:
+            datos_lista_disponibles = False
+            reservas = fetch_all(build_query(False))
+
+        # Una atención por proceso (estudiante+servicio): la PRIMERA cita ya ocurrida y no
+        # cancelada. Evita inflar el promedio con las sesiones siguientes de un servicio cíclico
+        # (que no son "espera", son el tratamiento ya en curso).
+        primera_por_proceso = {}
         for r in reservas:
             if (r.get("estado") or "").startswith("cancelado"):
                 continue
@@ -482,47 +503,56 @@ async def reporte_espera_comparativa(
             creada = parse_utc_naive(r.get("fecha_creacion"))
             if not cita or not creada:
                 continue
-            dias = (cita - creada).total_seconds() / 86400
-            if dias < 0:
-                dias = 0
-            total_dias_res += dias
-            cant_res += 1
-
-        # --- Espera en lista de espera: días desde el ingreso hasta ahora (aún esperando) ---
-        ahora = datetime.utcnow()  # fecha_ingreso se guarda como timestamptz (UTC)
-
-        def query_espera():
-            q = supabase.table("lista_espera").select(
-                "fecha_ingreso, id_servicio, estado_oferta"
-            ).eq("estado_oferta", "esperando")
-            if id_servicio:
-                q = q.eq("id_servicio", id_servicio)
-            return q
-
-        esperas = fetch_all(query_espera)
-        total_dias_esp = 0.0
-        cant_esp = 0
-        for e in esperas:
-            ingreso = parse_utc_naive(e.get("fecha_ingreso"))
-            if not ingreso:
+            if cita > ahora:
+                continue  # aún no atendido: no es una atención recibida
+            id_proc = r.get("id_proceso")
+            if id_proc is None:
                 continue
-            dias = (ahora - ingreso).total_seconds() / 86400
-            if dias < 0:
-                dias = 0
-            total_dias_esp += dias
-            cant_esp += 1
+            actual = primera_por_proceso.get(id_proc)
+            if actual is None or cita < actual["cita"]:
+                primera_por_proceso[id_proc] = {
+                    "cita": cita,
+                    "creada": creada,
+                    "ingreso_lista": parse_utc_naive(r.get("fecha_ingreso_lista")),
+                }
+
+        suma_total = 0.0
+        suma_reserva = 0.0
+        suma_espera = 0.0
+        cantidad = 0
+        for info in primera_por_proceso.values():
+            cita = info["cita"]
+            creada = info["creada"]
+            inicio = info["ingreso_lista"] or creada  # sin lista de espera → arranca en la reserva
+            dias_reserva = (cita - creada).total_seconds() / 86400
+            if dias_reserva < 0:
+                dias_reserva = 0
+            dias_espera = (creada - inicio).total_seconds() / 86400
+            if dias_espera < 0:
+                dias_espera = 0
+            suma_reserva += dias_reserva
+            suma_espera += dias_espera
+            suma_total += dias_reserva + dias_espera
+            cantidad += 1
+
+        prom_total = suma_total / cantidad if cantidad else 0
+        prom_reserva = suma_reserva / cantidad if cantidad else 0
+        prom_espera = suma_espera / cantidad if cantidad else 0
+        pct_reserva = (suma_reserva / suma_total * 100) if suma_total else 0
+        pct_espera = (suma_espera / suma_total * 100) if suma_total else 0
 
         return {
+            "cantidad": cantidad,
+            "promedio_total": round(prom_total, 1),
             "reserva": {
-                "total_dias": round(total_dias_res, 1),
-                "cantidad": cant_res,
-                "promedio": round(total_dias_res / cant_res, 1) if cant_res else 0,
+                "promedio": round(prom_reserva, 1),
+                "porcentaje": round(pct_reserva, 1),
             },
             "lista_espera": {
-                "total_dias": round(total_dias_esp, 1),
-                "cantidad": cant_esp,
-                "promedio": round(total_dias_esp / cant_esp, 1) if cant_esp else 0,
+                "promedio": round(prom_espera, 1),
+                "porcentaje": round(pct_espera, 1),
             },
+            "datos_lista_espera_disponibles": datos_lista_disponibles,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
