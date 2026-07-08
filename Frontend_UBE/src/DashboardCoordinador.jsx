@@ -1264,15 +1264,6 @@ export default function DashboardCoordinador({ session }) {
                   <div>
                     <h2 className="text-2xl font-bold text-blue-900 mb-2">{estudianteSeleccionado.nombres} {estudianteSeleccionado.apellidos}</h2>
                     <p className="text-gray-600 mb-6">Carrera: {estudianteSeleccionado.carrera} | RUT: {estudianteSeleccionado.rut}</p>
-                    
-                    <div className="flex gap-4 mb-8">
-                      <button onClick={() => iniciarAgendamiento('normal')} className="bg-blue-700 hover:bg-blue-800 text-white font-bold py-2 px-4 rounded shadow">
-                        Agendar Hora Normal
-                      </button>
-                      <button onClick={() => iniciarAgendamiento('prioritario')} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded shadow">
-                        Agendar Hora Prioritaria
-                      </button>
-                    </div>
 
                     <h3 className="text-lg font-bold text-gray-800 border-b pb-2 mb-4">Historial de Servicios</h3>
                     <HistorialEstudiante
