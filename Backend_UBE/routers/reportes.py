@@ -3,7 +3,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 from database import supabase, fetch_all
 from dependencies import obtener_usuario_actual
-from utils_tiempo import ahora_chile
+from utils_tiempo import ahora_chile, parse_utc_naive
 
 router = APIRouter(prefix="/reportes")
 
@@ -431,5 +431,98 @@ async def reporte_distribucion_carreras(
         resultados = [{"carrera": c, "cantidad": len(ids)} for c, ids in carreras.items()]
         resultados.sort(key=lambda x: x["cantidad"], reverse=True)
         return resultados
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/espera_comparativa")
+async def reporte_espera_comparativa(
+    fecha_inicio: Optional[str] = None,
+    fecha_fin: Optional[str] = None,
+    id_servicio: Optional[str] = None,
+    usuario_actual: dict = Depends(obtener_usuario_actual)
+):
+    """Compara los días de espera de dos caminos distintos:
+
+    - **Por reserva**: días entre que el estudiante reservó (`reserva.fecha_creacion`) y la
+      fecha de su cita (`bloque_horario.fecha_hora_inicio`). Excluye reservas canceladas.
+      El rango de fechas filtra por fecha de la cita.
+    - **Por lista de espera**: días desde que el estudiante entró a la lista (`fecha_ingreso`)
+      hasta ahora, para los que **siguen esperando** (`estado_oferta = 'esperando'`). Es la única
+      espera medible, porque al asignar una hora la fila de lista_espera se elimina.
+
+    Devuelve total de días acumulados, cantidad y promedio por cada camino.
+    """
+    if usuario_actual["rol"] not in ROLES_REPORTES:
+        raise HTTPException(status_code=403, detail="Acceso denegado.")
+    try:
+        ff = _fin_dia(fecha_fin)
+
+        # --- Espera por reserva: días entre la creación de la reserva y la cita ---
+        def query_reservas():
+            q = supabase.table("reserva").select(
+                "fecha_creacion, estado, bloque_horario!inner(fecha_hora_inicio, id_servicio)"
+            )
+            if fecha_inicio:
+                q = q.gte("bloque_horario.fecha_hora_inicio", fecha_inicio)
+            if ff:
+                q = q.lte("bloque_horario.fecha_hora_inicio", ff)
+            if id_servicio:
+                q = q.eq("bloque_horario.id_servicio", id_servicio)
+            return q
+
+        reservas = fetch_all(query_reservas)
+        total_dias_res = 0.0
+        cant_res = 0
+        for r in reservas:
+            if (r.get("estado") or "").startswith("cancelado"):
+                continue
+            bh = r.get("bloque_horario") or {}
+            cita = parse_utc_naive(bh.get("fecha_hora_inicio"))
+            creada = parse_utc_naive(r.get("fecha_creacion"))
+            if not cita or not creada:
+                continue
+            dias = (cita - creada).total_seconds() / 86400
+            if dias < 0:
+                dias = 0
+            total_dias_res += dias
+            cant_res += 1
+
+        # --- Espera en lista de espera: días desde el ingreso hasta ahora (aún esperando) ---
+        ahora = datetime.utcnow()  # fecha_ingreso se guarda como timestamptz (UTC)
+
+        def query_espera():
+            q = supabase.table("lista_espera").select(
+                "fecha_ingreso, id_servicio, estado_oferta"
+            ).eq("estado_oferta", "esperando")
+            if id_servicio:
+                q = q.eq("id_servicio", id_servicio)
+            return q
+
+        esperas = fetch_all(query_espera)
+        total_dias_esp = 0.0
+        cant_esp = 0
+        for e in esperas:
+            ingreso = parse_utc_naive(e.get("fecha_ingreso"))
+            if not ingreso:
+                continue
+            dias = (ahora - ingreso).total_seconds() / 86400
+            if dias < 0:
+                dias = 0
+            total_dias_esp += dias
+            cant_esp += 1
+
+        return {
+            "reserva": {
+                "total_dias": round(total_dias_res, 1),
+                "cantidad": cant_res,
+                "promedio": round(total_dias_res / cant_res, 1) if cant_res else 0,
+            },
+            "lista_espera": {
+                "total_dias": round(total_dias_esp, 1),
+                "cantidad": cant_esp,
+                "promedio": round(total_dias_esp / cant_esp, 1) if cant_esp else 0,
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

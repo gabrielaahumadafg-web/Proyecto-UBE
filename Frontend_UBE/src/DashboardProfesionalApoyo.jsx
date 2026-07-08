@@ -45,6 +45,16 @@ export default function DashboardProfesionalApoyo({ session }) {
   const [ocupacionSemanal, setOcupacionSemanal] = useState([]);
   const [cargandoEstadisticas, setCargandoEstadisticas] = useState(false);
 
+  // Estados para Ocupación / Espera (pestaña nueva)
+  const inicioAnio = `${new Date().getFullYear()}-01-01`;
+  const hoyISO = fmtFecha(new Date());
+  const [fechaOcupIni, setFechaOcupIni] = useState(inicioAnio);
+  const [fechaOcupFin, setFechaOcupFin] = useState(hoyISO);
+  const [ocupacionEspecialidad, setOcupacionEspecialidad] = useState([]);
+  const [ocupacionGeneral, setOcupacionGeneral] = useState({ total: 0, ocupados: 0, porcentaje: 0 });
+  const [esperaComparativa, setEsperaComparativa] = useState(null);
+  const [cargandoOcupEspera, setCargandoOcupEspera] = useState(false);
+
   const authHeaders = { Authorization: `Bearer ${session.access_token}` };
 
   // Cargar datos base al iniciar
@@ -315,10 +325,57 @@ export default function DashboardProfesionalApoyo({ session }) {
     }
   };
 
+  // --- Ocupación / Espera: % ocupación por especialidad + comparación de días de espera ---
+  const fetchOcupacionEspera = async () => {
+    setCargandoOcupEspera(true);
+    try {
+      const rango = `fecha_inicio=${fechaOcupIni}T00:00:00&fecha_fin=${fechaOcupFin}T23:59:59`;
+
+      const [resOcup, resEspera] = await Promise.all([
+        fetch(`${API_URL}/reportes/ocupacion?${rango}`, { headers: authHeaders }),
+        fetch(`${API_URL}/reportes/espera_comparativa?${rango}`, { headers: authHeaders }),
+      ]);
+
+      // Métrica 1: agrupar la ocupación (por profesional+servicio) en % por especialidad.
+      if (resOcup.ok) {
+        const datos = await resOcup.json();
+        const porServicio = {};
+        datos.forEach(({ id_servicio, servicio, total_bloques, bloques_ocupados }) => {
+          if (!porServicio[id_servicio]) porServicio[id_servicio] = { servicio, total: 0, ocupados: 0 };
+          porServicio[id_servicio].total += total_bloques;
+          porServicio[id_servicio].ocupados += bloques_ocupados;
+        });
+        const lista = Object.values(porServicio).map((d) => ({
+          servicio: d.servicio,
+          total: d.total,
+          ocupados: d.ocupados,
+          porcentaje: d.total > 0 ? Math.round((d.ocupados / d.total) * 100) : 0,
+        })).sort((a, b) => b.porcentaje - a.porcentaje);
+        setOcupacionEspecialidad(lista);
+
+        const totalGen = lista.reduce((s, d) => s + d.total, 0);
+        const ocupGen = lista.reduce((s, d) => s + d.ocupados, 0);
+        setOcupacionGeneral({
+          total: totalGen,
+          ocupados: ocupGen,
+          porcentaje: totalGen > 0 ? Math.round((ocupGen / totalGen) * 100) : 0,
+        });
+      }
+
+      // Métrica 2: días de espera por reserva vs por lista de espera.
+      if (resEspera.ok) setEsperaComparativa(await resEspera.json());
+    } catch (e) {
+      console.error('Error al cargar ocupación / espera', e);
+    } finally {
+      setCargandoOcupEspera(false);
+    }
+  };
+
   useEffect(() => {
     if (pestañaActiva === 'inicio') fetchAtencionesEspecialidad();
     if (pestañaActiva === 'ocupacion_actual') fetchOcupacionActual();
     if (pestañaActiva === 'estadisticas') fetchEstadisticas();
+    if (pestañaActiva === 'ocupacion_espera') fetchOcupacionEspera();
   }, [pestañaActiva]);
 
   const cerrarSesion = async () => {
@@ -356,6 +413,7 @@ export default function DashboardProfesionalApoyo({ session }) {
         <div className="flex space-x-2 border-b-2 border-gray-200 mb-6 pb-2 overflow-x-auto">
           <button onClick={() => setPestañaActiva('inicio')} className={tabClass('inicio')}>Resumen Global</button>
           <button onClick={() => setPestañaActiva('ocupacion_actual')} className={tabClass('ocupacion_actual')}>Ocupación Actual</button>
+          <button onClick={() => setPestañaActiva('ocupacion_espera')} className={tabClass('ocupacion_espera')}>Ocupación / Espera</button>
           <button onClick={() => setPestañaActiva('reportes_clinicos')} className={tabClass('reportes_clinicos')}>Reportes Clínicos</button>
           <button onClick={() => setPestañaActiva('estadisticas')} className={tabClass('estadisticas')}>Estadísticas y Demanda</button>
         </div>
@@ -458,6 +516,116 @@ export default function DashboardProfesionalApoyo({ session }) {
             </div>
           );
         })()}
+
+        {pestañaActiva === 'ocupacion_espera' && (
+          <div>
+            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-6">
+              <div>
+                <h1 className="text-2xl md:text-3xl font-bold text-blue-900">Ocupación y Espera</h1>
+                <p className="text-gray-500 text-sm mt-1">% de horas ocupadas por especialidad y días de espera según el camino de reserva</p>
+              </div>
+              <div className="flex flex-wrap gap-2 items-end">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Desde</label>
+                  <input type="date" value={fechaOcupIni} onChange={(e) => setFechaOcupIni(e.target.value)} className="p-2 border border-gray-300 rounded text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Hasta</label>
+                  <input type="date" value={fechaOcupFin} onChange={(e) => setFechaOcupFin(e.target.value)} className="p-2 border border-gray-300 rounded text-sm outline-none" />
+                </div>
+                <button onClick={fetchOcupacionEspera} disabled={cargandoOcupEspera} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm">
+                  {cargandoOcupEspera ? 'Cargando...' : 'Aplicar'}
+                </button>
+              </div>
+            </div>
+
+            {/* Métrica 1: % ocupación por especialidad + general */}
+            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mb-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 gap-2">
+                <div>
+                  <h3 className="font-bold text-gray-800">% de Ocupación por Especialidad</h3>
+                  <p className="text-xs text-gray-500">De las horas publicadas en el rango, cuántas se ocuparon (reservadas/confirmadas)</p>
+                </div>
+                <div className="flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-lg px-4 py-2">
+                  <div className="text-right">
+                    <p className="text-xs text-gray-500 font-medium">Ocupación general</p>
+                    <p className="text-xs text-gray-400">{ocupacionGeneral.ocupados} / {ocupacionGeneral.total} horas</p>
+                  </div>
+                  <span className={`px-3 py-1 rounded-full font-bold text-lg ${ocupacionGeneral.porcentaje >= 80 ? 'bg-green-100 text-green-800' : ocupacionGeneral.porcentaje >= 50 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                    {ocupacionGeneral.porcentaje}%
+                  </span>
+                </div>
+              </div>
+              {cargandoOcupEspera ? (
+                <div className="h-72 flex items-center justify-center text-gray-400">Cargando...</div>
+              ) : ocupacionEspecialidad.length === 0 ? (
+                <div className="h-72 flex items-center justify-center text-gray-400 italic">Sin horas publicadas en el rango seleccionado.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={Math.max(288, ocupacionEspecialidad.length * 46)}>
+                  <BarChart data={ocupacionEspecialidad} layout="vertical" margin={{ top: 5, right: 40, bottom: 5, left: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 12 }} />
+                    <YAxis type="category" dataKey="servicio" width={130} tick={{ fontSize: 11 }} interval={0} />
+                    <Tooltip formatter={(v, _n, p) => [`${v}%  (${p.payload.ocupados}/${p.payload.total} horas)`, 'Ocupación']} />
+                    <Bar dataKey="porcentaje" name="Ocupación" radius={[0, 4, 4, 0]}>
+                      {ocupacionEspecialidad.map((d) => (
+                        <Cell key={d.servicio} fill={d.porcentaje >= 80 ? COLOR_PRESENTE : d.porcentaje >= 50 ? COLOR_ATRASO : COLOR_AUSENTE} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* Métrica 2: días de espera por reserva vs lista de espera */}
+            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+              <h3 className="font-bold text-gray-800 mb-1">Días de Espera: Reserva vs Lista de Espera</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                <strong>Por reserva:</strong> días entre reservar y la cita. <strong>Por lista de espera:</strong> días acumulados de quienes siguen esperando una hora.
+              </p>
+              {cargandoOcupEspera ? (
+                <div className="h-72 flex items-center justify-center text-gray-400">Cargando...</div>
+              ) : !esperaComparativa ? (
+                <div className="h-72 flex items-center justify-center text-gray-400 italic">Sin datos de espera.</div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2">
+                    <ResponsiveContainer width="100%" height={288}>
+                      <BarChart
+                        data={[
+                          { nombre: 'Por Reserva', dias: esperaComparativa.reserva.total_dias, color: COLOR_BARRA },
+                          { nombre: 'Por Lista de Espera', dias: esperaComparativa.lista_espera.total_dias, color: COLOR_ATRASO },
+                        ]}
+                        margin={{ top: 5, right: 20, bottom: 5, left: 0 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="nombre" tick={{ fontSize: 12 }} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                        <Tooltip formatter={(v) => [`${v} días`, 'Total acumulado']} />
+                        <Bar dataKey="dias" name="Días acumulados" radius={[4, 4, 0, 0]}>
+                          <Cell fill={COLOR_BARRA} />
+                          <Cell fill={COLOR_ATRASO} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex flex-col gap-4 justify-center">
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-4">
+                      <p className="text-sm font-bold text-blue-900 mb-1">Por Reserva</p>
+                      <p className="text-2xl font-bold text-gray-800">{esperaComparativa.reserva.total_dias} <span className="text-sm font-medium text-gray-500">días</span></p>
+                      <p className="text-xs text-gray-500 mt-1">{esperaComparativa.reserva.cantidad} reservas · {esperaComparativa.reserva.promedio} días promedio</p>
+                    </div>
+                    <div className="bg-yellow-50 border border-yellow-100 rounded-lg p-4">
+                      <p className="text-sm font-bold text-yellow-800 mb-1">Por Lista de Espera</p>
+                      <p className="text-2xl font-bold text-gray-800">{esperaComparativa.lista_espera.total_dias} <span className="text-sm font-medium text-gray-500">días</span></p>
+                      <p className="text-xs text-gray-500 mt-1">{esperaComparativa.lista_espera.cantidad} esperando · {esperaComparativa.lista_espera.promedio} días promedio</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {pestañaActiva === 'reportes_clinicos' && (
           <div>
