@@ -961,14 +961,22 @@ export default function DashboardCoordinador({ session }) {
                   <label className="block text-gray-700 font-medium mb-1">Duración en minutos (por atención)</label>
                   <input type="number" value={nuevoServicioDuracion} onChange={(e)=>setNuevoServicioDuracion(e.target.value)} required min="1" className="w-full p-2 border rounded text-sm" />
                 </div>
-                <div>
-                  <label className="block text-gray-700 font-medium mb-1">Tope de sesiones (Dejar vacío si no tiene límite)</label>
-                  <input type="number" value={nuevoServicioTope} onChange={(e)=>setNuevoServicioTope(e.target.value)} min="1" className="w-full p-2 border rounded text-sm" />
-                </div>
                 <div className="flex items-center space-x-2 mt-4">
-                  <input type="checkbox" id="es_ciclico" checked={nuevoServicioCiclico} onChange={(e)=>setNuevoServicioCiclico(e.target.checked)} className="h-4 w-4 text-blue-600" />
+                  <input type="checkbox" id="es_ciclico" checked={nuevoServicioCiclico} onChange={(e)=>{ const marcado = e.target.checked; setNuevoServicioCiclico(marcado); if (!marcado) setNuevoServicioTope(''); }} className="h-4 w-4 text-blue-600" />
                   <label htmlFor="es_ciclico" className="text-gray-700 font-medium">Es un servicio cíclico (seguimiento semanal)</label>
                 </div>
+                {nuevoServicioCiclico && (
+                  <div>
+                    <label className="block text-gray-700 font-medium mb-1">Tope de sesiones (Dejar vacío si no tiene límite)</label>
+                    <select value={nuevoServicioTope} onChange={(e)=>setNuevoServicioTope(e.target.value)} className="w-full p-2 border rounded text-sm bg-white">
+                      <option value="">Sin límite</option>
+                      {Array.from({ length: 20 }, (_, i) => i + 1).map((n) => (
+                        <option key={n} value={n}>{n} {n === 1 ? 'sesión' : 'sesiones'}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-400 mt-1">Cuántas sesiones semanales se reservan por proceso. Solo aplica a servicios cíclicos.</p>
+                  </div>
+                )}
                 <div className="flex gap-2 mt-4">
                   <button type="submit" className="w-full bg-blue-700 hover:bg-blue-800 text-white font-bold py-3 rounded">
                     {servicioEditando ? "Actualizar" : "Guardar Especialidad"}
